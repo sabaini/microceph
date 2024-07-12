@@ -51,6 +51,11 @@ func addStopRGWExpectations(s *rgwSuite, r *mocks.Runner) {
 	r.On("RunCommand", tests.CmdAny("snapctl", 3)...).Return("ok", nil).Once()
 }
 
+// Expect: run ceph auth
+func addCreateRGWKeyringExpectations(r *mocks.Runner) {
+	r.On("RunCommand", tests.CmdAny("ceph", 9)...).Return("ok", nil).Once()
+}
+
 // Set up test suite
 func (s *rgwSuite) SetupTest() {
 	s.BaseSuite.SetupTest()
@@ -67,7 +72,7 @@ func (s *rgwSuite) TestEnableRGW() {
 
 	processExec = r
 
-	err := EnableRGW(s.TestStateInterface, 80, []string{"10.1.1.1", "10.2.2.2"})
+	err := EnableRGW(s.TestStateInterface, 80, 443, "", "", []string{"10.1.1.1", "10.2.2.2"})
 
 	assert.NoError(s.T(), err)
 
@@ -75,6 +80,23 @@ func (s *rgwSuite) TestEnableRGW() {
 	conf := s.ReadCephConfig("radosgw.conf")
 	assert.Contains(s.T(), conf, "rgw frontends = beast port=80")
 	assert.Contains(s.T(), conf, "mon host = 10.1.1.1,10.2.2.2")
+}
+
+// Test enabling RGW
+func (s *rgwSuite) TestEnableRGWWithSSL() {
+	r := mocks.NewRunner(s.T())
+
+	addRGWEnableExpectations(r)
+
+	processExec = r
+
+	err := EnableRGW(s.TestStateInterface, 80, 443, "/var/snap/microceph/common/server.crt", "/var/snap/microceph/common/server.key", []string{"10.1.1.1", "10.2.2.2"})
+
+	assert.NoError(s.T(), err)
+
+	// check that the radosgw.conf file contains expected values
+	conf := s.ReadCephConfig("radosgw.conf")
+	assert.Contains(s.T(), conf, "rgw frontends = beast port=80 ssl_port=443 ssl_certificate=/var/snap/microceph/common/server.crt ssl_private_key=/var/snap/microceph/common/server.key\n")
 }
 
 func (s *rgwSuite) TestDisableRGW() {

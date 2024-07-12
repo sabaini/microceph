@@ -15,13 +15,16 @@ import (
 )
 
 // EnableRGW enables the RGW service on the cluster and adds initial configuration given a service port number.
-func EnableRGW(s interfaces.StateInterface, port int, monitors []string) error {
+func EnableRGW(s interfaces.StateInterface, port int, sslPort int, sslCertificate string, sslPrivateKey string, monitors []string) error {
 	pathConsts := constants.GetPathConst()
 
 	configs := map[string]any{
-		"runDir":   pathConsts.RunPath,
-		"monitors": strings.Join(monitors, ","),
-		"rgwPort":  port,
+		"runDir":         pathConsts.RunPath,
+		"monitors":       strings.Join(monitors, ","),
+		"rgwPort":        port,
+		"sslPort":        sslPort,
+		"sslCertificate": sslCertificate,
+		"sslPrivateKey":  sslPrivateKey,
 	}
 
 	// Create RGW configuration.
