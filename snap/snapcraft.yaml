@@ -47,6 +47,7 @@ apps:
       - mount-observe
       - network
       - network-bind
+      - microceph-support
     slots:
       - microceph
   mds:
@@ -84,6 +85,7 @@ apps:
       - hardware-observe
       - network
       - network-bind
+      - microceph-support
 
   rgw:
     command: commands/rgw.start
@@ -115,6 +117,7 @@ apps:
     command: commands/rbd
     plugs:
       - network
+      - microceph-support
   rados:
     command: commands/rados
     plugs:
