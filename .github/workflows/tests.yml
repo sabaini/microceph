@@ -799,3 +799,7 @@ jobs:
 
     - name: Verify Remote removal
       run: ~/actionutils.sh remote_remove_and_verify
+
+    - name: Setup upterm session
+      if: ${{ failure() && runner.debug }}
+      uses: lhotari/action-upterm@v1
