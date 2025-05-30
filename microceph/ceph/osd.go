@@ -34,6 +34,16 @@ import (
 	"github.com/canonical/microceph/microceph/database"
 )
 
+// OSDManager handles OSD operations.
+type OSDManager struct {
+	state state.State
+}
+
+// NewOSDManager returns a new OSD manager instance.
+func NewOSDManager(s state.State) *OSDManager {
+	return &OSDManager{state: s}
+}
+
 func prepareDisk(disk *types.DiskParameter, suffix string, osdPath string, osdID int64) error {
 	if disk.Wipe {
 		err := timeoutWipe(disk.Path)
@@ -363,7 +373,7 @@ func createBackingFile(dir string, size uint64) (string, error) {
 }
 
 // AddLoopBackOSDs adds OSDs to the cluster backed by loopback files
-func AddLoopBackOSDs(ctx context.Context, s state.State, spec string) error {
+func (m *OSDManager) AddLoopBackOSDs(ctx context.Context, spec string) error {
 	size, num, err := parseBackingSpec(spec)
 	if err != nil {
 		return err
@@ -378,7 +388,7 @@ func AddLoopBackOSDs(ctx context.Context, s state.State, spec string) error {
 	}
 	// create backing files in a loop and add them to the cluster
 	for i := 0; i < num; i++ {
-		err = AddOSD(ctx, s, types.DiskParameter{LoopSize: size}, nil, nil)
+		err = m.AddOSD(ctx, types.DiskParameter{LoopSize: size}, nil, nil)
 		if err != nil {
 			return fmt.Errorf("failed to add loop OSD: %w", err)
 		}
@@ -465,12 +475,12 @@ func prepareValidationFailureResp(disks []types.DiskParameter, err error) types.
 }
 
 // AddBulkDisks adds multiple disks as OSDs and generates the API response for request.
-func AddBulkDisks(ctx context.Context, s state.State, disks []types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddResponse {
+func (m *OSDManager) AddBulkDisks(ctx context.Context, disks []types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddResponse {
 	ret := types.DiskAddResponse{}
 
 	if len(disks) == 1 {
 		// Add single disk with requested WAL/DB devices.
-		resp := AddSingleDisk(ctx, s, disks[0], wal, db)
+		resp := m.AddSingleDisk(ctx, disks[0], wal, db)
 		ret.Reports = append(ret.Reports, resp)
 		ret.ValidationError = "" // Validation is done for batch requests.
 		return ret
@@ -487,7 +497,7 @@ func AddBulkDisks(ctx context.Context, s state.State, disks []types.DiskParamete
 
 	// Add all requested disks.
 	for _, disk := range disks {
-		resp := AddSingleDisk(ctx, s, disk, nil, nil)
+		resp := m.AddSingleDisk(ctx, disk, nil, nil)
 		ret.Reports = append(ret.Reports, resp)
 	}
 
@@ -495,17 +505,17 @@ func AddBulkDisks(ctx context.Context, s state.State, disks []types.DiskParamete
 }
 
 // AddSingleDisk is a wrapper around AddOSD which logs disk addition failures and returns a formatted response.
-func AddSingleDisk(ctx context.Context, s state.State, disk types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport {
+func (m *OSDManager) AddSingleDisk(ctx context.Context, disk types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport {
 	if strings.Contains(disk.Path, constants.LoopSpecId) {
 		// Add file based OSDs.
-		err := AddLoopBackOSDs(ctx, s, disk.Path)
+		err := m.AddLoopBackOSDs(ctx, disk.Path)
 		if err != nil {
 			logger.Errorf("failed to add disk: spec %s, err %v", disk.Path, err)
 			return types.DiskAddReport{Path: disk.Path, Report: "Failure", Error: err.Error()}
 		}
 	} else {
 		// Add physical disk based OSD.
-		err := AddOSD(ctx, s, disk, wal, db)
+		err := m.AddOSD(ctx, disk, wal, db)
 		if err != nil {
 			logger.Errorf("failed to add disk: path %s, err %v", disk.Path, err)
 			// return failure as response.
@@ -519,7 +529,7 @@ func AddSingleDisk(ctx context.Context, s state.State, disk types.DiskParameter,
 
 // AddOSD adds an OSD to the cluster, given the data, WAL and DB devices and their respective
 // flags for wiping and encrypting.
-func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) error {
+func (m *OSDManager) AddOSD(ctx context.Context, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) error {
 	logger.Debugf("Adding OSD %s", data.Path)
 
 	var err error
@@ -548,8 +558,8 @@ func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *t
 
 	// Record the disk.
 	var nr int64
-	err = s.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		nr, err = database.CreateDisk(ctx, tx, database.Disk{Member: s.Name(), Path: data.Path})
+	err = m.state.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		nr, err = database.CreateDisk(ctx, tx, database.Disk{Member: m.state.Name(), Path: data.Path})
 		if err != nil {
 			return fmt.Errorf("failed to record disk: %w", err)
 		}
@@ -566,8 +576,8 @@ func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *t
 	// if we fail later, make sure we free up the record
 	revert.Add(func() {
 		os.RemoveAll(osdDataPath)
-		s.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			database.DeleteDisk(ctx, tx, s.Name(), data.Path)
+		m.state.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			database.DeleteDisk(ctx, tx, m.state.Name(), data.Path)
 			return nil
 		})
 	})
@@ -586,8 +596,8 @@ func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *t
 		}
 		data.Path = backing
 		// update db, it didn't have a path before
-		err = s.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			err = database.OSDQuery.UpdatePath(ctx, s, nr, backing)
+		err = m.state.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			err = database.OSDQuery.UpdatePath(ctx, m.state, nr, backing)
 			if err != nil {
 				return fmt.Errorf("failed to update disk record: %w", err)
 			}
@@ -630,7 +640,7 @@ func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *t
 	}
 
 	// Maybe update the failure domain
-	err = updateFailureDomain(ctx, s)
+	err = updateFailureDomain(ctx, m.state)
 	if err != nil {
 		return err
 	}
@@ -638,6 +648,26 @@ func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *t
 	revert.Success() // Revert functions added are not run on return.
 	logger.Debugf("Added osd.%d", nr)
 	return nil
+}
+
+// AddLoopBackOSDs adds OSDs backed by loopback files using a one-off manager.
+func AddLoopBackOSDs(ctx context.Context, s state.State, spec string) error {
+	return NewOSDManager(s).AddLoopBackOSDs(ctx, spec)
+}
+
+// AddBulkDisks adds multiple disks using a one-off manager.
+func AddBulkDisks(ctx context.Context, s state.State, disks []types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddResponse {
+	return NewOSDManager(s).AddBulkDisks(ctx, disks, wal, db)
+}
+
+// AddSingleDisk adds a single disk using a one-off manager.
+func AddSingleDisk(ctx context.Context, s state.State, disk types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport {
+	return NewOSDManager(s).AddSingleDisk(ctx, disk, wal, db)
+}
+
+// AddOSD adds an OSD using a one-off manager.
+func AddOSD(ctx context.Context, s state.State, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) error {
+	return NewOSDManager(s).AddOSD(ctx, data, wal, db)
 }
 
 // ListOSD lists current OSD disks

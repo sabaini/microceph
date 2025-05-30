@@ -8,6 +8,7 @@ import (
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/microceph/microceph/tests"
 
+	"github.com/canonical/microceph/microceph/api/types"
 	"github.com/canonical/microceph/microceph/database"
 	"github.com/canonical/microceph/microceph/mocks"
 	"github.com/stretchr/testify/assert"
@@ -318,4 +319,18 @@ func (s *osdSuite) TestIsOsdNooutSetFail() {
 	set, err := isOsdNooutSet()
 	assert.False(s.T(), set)
 	assert.Error(s.T(), err)
+}
+
+// TestAddBulkDisksValidation ensures batch addition arguments are checked.
+func (s *osdSuite) TestAddBulkDisksValidation() {
+	mgr := NewOSDManager(nil)
+	disks := []types.DiskParameter{
+		{Path: "/dev/sda"},
+		{Path: "/dev/sdb"},
+	}
+	wal := &types.DiskParameter{Path: "/dev/wal"}
+
+	resp := mgr.AddBulkDisks(context.Background(), disks, wal, nil)
+	assert.NotEmpty(s.T(), resp.ValidationError)
+	assert.Equal(s.T(), "Failure", resp.Reports[0].Report)
 }
