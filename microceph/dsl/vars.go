@@ -74,6 +74,8 @@ func (dc *DeviceContext) ResolveVariable(name string) (Value, error) {
 	}
 }
 
+// getDevNode returns the kernel device node path for a disk resource e.g. /dev/sda
+// If the kernel device is not set, falls back to the by-id or by-path device path
 func getDevNode(disk api.ResourcesStorageDisk) string {
 	id := strings.TrimSpace(disk.ID)
 	if id == "" {
