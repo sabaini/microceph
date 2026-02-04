@@ -246,7 +246,7 @@ func TestEvaluatorRegex(t *testing.T) {
 		},
 		{
 			name:     "regex devnode pattern",
-			input:    "re('^/dev/disk/by-id/nvme', @devnode)",
+			input:    "re('^/dev/nvme', @devnode)",
 			expected: true,
 		},
 		{
@@ -311,7 +311,7 @@ func TestEvaluatorVariables(t *testing.T) {
 	assert.True(t, result.Bool())
 
 	// Test @devnode
-	expr, _ = Parse("re('^/dev/disk/by-id/', @devnode)")
+	expr, _ = Parse("re('^/dev/sd', @devnode)")
 	result, err = eval.Eval(expr)
 	require.NoError(t, err)
 	assert.True(t, result.Bool())

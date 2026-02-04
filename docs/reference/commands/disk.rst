@@ -128,7 +128,7 @@ Available variables:
 - ``@vendor`` - Vendor name extracted from model (lowercased)
 - ``@model`` - Full model string (lowercased)
 - ``@size`` - Device size in bytes (compare with units like 100GiB, 500MB)
-- ``@devnode`` - Device path (e.g., /dev/disk/by-id/...)
+- ``@devnode`` - Kernel device node path (e.g., /dev/sda, /dev/nvme0n1)
 - ``@host`` - Short hostname
 
 Size units: B, KiB, MiB, GiB, TiB, PiB (1024-based) or KB, MB, GB, TB, PB (1000-based).

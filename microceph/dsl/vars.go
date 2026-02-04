@@ -13,7 +13,8 @@ import (
 type DeviceContext struct {
 	Disk     api.ResourcesStorageDisk
 	Hostname string
-	Path     string // computed device path
+	Path     string // computed device path used for disk operations
+	DevNode  string // kernel device node exposed via @devnode
 }
 
 // NewDeviceContext creates a new DeviceContext from a disk resource.
@@ -22,6 +23,7 @@ func NewDeviceContext(disk api.ResourcesStorageDisk, hostname string) *DeviceCon
 		Disk:     disk,
 		Hostname: hostname,
 		Path:     common.GetDevicePath(&disk),
+		DevNode:  getDevNode(disk),
 	}
 }
 
@@ -44,7 +46,7 @@ func GetHostname() string {
 //   - @vendor: vendor name extracted from model, lowercased
 //   - @model: full model string, lowercased
 //   - @size: disk size in bytes
-//   - @devnode: device path (e.g., /dev/sda or /dev/disk/by-id/...)
+//   - @devnode: kernel device node (e.g., /dev/sda, /dev/nvme0n1)
 //   - @host: short hostname
 func (dc *DeviceContext) ResolveVariable(name string) (Value, error) {
 	switch strings.ToLower(name) {
@@ -62,7 +64,7 @@ func (dc *DeviceContext) ResolveVariable(name string) (Value, error) {
 		return NumberValue(float64(dc.Disk.Size)), nil
 
 	case "devnode":
-		return StringValue(dc.Path), nil
+		return StringValue(dc.DevNode), nil
 
 	case "host":
 		return StringValue(dc.Hostname), nil
@@ -70,6 +72,21 @@ func (dc *DeviceContext) ResolveVariable(name string) (Value, error) {
 	default:
 		return nil, &UnknownVariableError{Name: "@" + name}
 	}
+}
+
+// getDevNode returns the kernel device node path for a disk resource e.g. /dev/sda
+// If the kernel device is not set, falls back to the by-id or by-path device path
+func getDevNode(disk api.ResourcesStorageDisk) string {
+	id := strings.TrimSpace(disk.ID)
+	if id == "" {
+		return common.GetDevicePath(&disk)
+	}
+
+	if strings.HasPrefix(id, "/dev/") {
+		return id
+	}
+
+	return fmt.Sprintf("/dev/%s", id)
 }
 
 // extractVendor extracts the vendor name from a model string.
