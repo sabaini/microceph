@@ -296,6 +296,83 @@ function test_dsl_mutual_exclusivity() {
     fi
 }
 
+# Test: WAL/DB phase2 flag validation
+function test_dsl_wal_db_flag_validation() {
+    set -eux
+
+    echo "Test: WAL/DB DSL flag validation..."
+
+    wal_missing_size=$(vm_exec microceph disk add --osd-match "eq(@type, 'scsi')" --wal-match "eq(@type, 'scsi')" --dry-run 2>&1) || true
+    echo "$wal_missing_size"
+    if echo "$wal_missing_size" | grep -qi "wal-size is required"; then
+        echo "PASS: --wal-match requires --wal-size"
+    else
+        echo "FAIL: expected wal-size validation error"
+        exit 1
+    fi
+
+    db_missing_size=$(vm_exec microceph disk add --osd-match "eq(@type, 'scsi')" --db-match "eq(@type, 'scsi')" --dry-run 2>&1) || true
+    echo "$db_missing_size"
+    if echo "$db_missing_size" | grep -qi "db-size is required"; then
+        echo "PASS: --db-match requires --db-size"
+    else
+        echo "FAIL: expected db-size validation error"
+        exit 1
+    fi
+}
+
+# Test: WAL/DB dry-run partition planning output
+function test_dsl_wal_db_dry_run_plan() {
+    set -eux
+
+    echo "Test: WAL/DB dry-run planning..."
+
+    # Typical setup in this VM has a smaller test disk (~10GiB) and a larger one (~20GiB).
+    dsl_phase2_output=$(vm_exec microceph disk add \
+        --osd-match "and(eq(@type, 'scsi'), le(@size, 15GiB))" \
+        --wal-match "and(eq(@type, 'scsi'), gt(@size, 15GiB))" \
+        --wal-size 1GiB \
+        --dry-run 2>&1) || true
+
+    echo "WAL/DB dry-run output:"
+    echo "$dsl_phase2_output"
+
+    if echo "$dsl_phase2_output" | grep -qiE "Matched WAL backing devices|Planned partition creation|Planned OSD assignments"; then
+        echo "PASS: WAL/DB dry-run planning output detected"
+    elif echo "$dsl_phase2_output" | grep -qi "No devices matched"; then
+        echo "SKIP: No matching devices in this environment"
+    else
+        echo "FAIL: Unexpected WAL/DB dry-run output"
+        exit 1
+    fi
+}
+
+# Test: Empty WAL/DB matches are non-fatal in dry-run
+function test_dsl_wal_db_empty_match_nonfatal() {
+    set -eux
+
+    echo "Test: empty WAL/DB matches should be non-fatal..."
+    out=$(vm_exec microceph disk add \
+        --osd-match "eq(@type, 'scsi')" \
+        --wal-match "eq(@type, 'nvme')" \
+        --wal-size 1GiB \
+        --dry-run 2>&1) || true
+
+    echo "$out"
+
+    if echo "$out" | grep -qi "Validation Error found\|validation_error"; then
+        echo "FAIL: empty WAL match should not be validation error"
+        exit 1
+    fi
+
+    if echo "$out" | grep -qiE "would be added|PATH|No devices matched"; then
+        echo "PASS: command succeeded without fatal WAL match error"
+    else
+        echo "FAIL: unexpected output for empty WAL match scenario"
+        exit 1
+    fi
+}
+
 # Test: Add disk using DSL
 function test_dsl_add_disk() {
     set -eux
@@ -447,6 +524,9 @@ function run_dsl_tests() {
     test_dsl_no_match
     test_dsl_invalid_expression
     test_dsl_mutual_exclusivity
+    test_dsl_wal_db_flag_validation
+    test_dsl_wal_db_dry_run_plan
+    test_dsl_wal_db_empty_match_nonfatal
     test_dsl_pristine_check
     test_dsl_pristine_with_wipe
     test_dsl_idempotency

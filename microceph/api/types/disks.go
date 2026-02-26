@@ -15,6 +15,14 @@ type DisksPost struct {
 	// OSDMatch is a DSL expression for matching devices to use as OSDs.
 	// When set, Path is ignored and devices are selected based on the expression.
 	OSDMatch string `json:"osd_match,omitempty" yaml:"osd_match,omitempty"`
+	// WALMatch is a DSL expression for matching backing devices used for WAL partitions.
+	WALMatch string `json:"wal_match,omitempty" yaml:"wal_match,omitempty"`
+	// DBMatch is a DSL expression for matching backing devices used for DB partitions.
+	DBMatch string `json:"db_match,omitempty" yaml:"db_match,omitempty"`
+	// WALSize is the requested WAL partition size (e.g. 4GiB).
+	WALSize string `json:"wal_size,omitempty" yaml:"wal_size,omitempty"`
+	// DBSize is the requested DB partition size (e.g. 20GiB).
+	DBSize string `json:"db_size,omitempty" yaml:"db_size,omitempty"`
 	// DryRun when true causes the command to report which devices would be
 	// added without actually adding them. Only valid when OSDMatch is set.
 	DryRun bool `json:"dry_run,omitempty" yaml:"dry_run,omitempty"`
@@ -31,9 +39,17 @@ type DiskAddReport struct {
 type DiskAddResponse struct {
 	ValidationError string          `json:"validation_error" yaml:"validation_error"`
 	Reports         []DiskAddReport `json:"report" yaml:"report"`
-	// DryRunDevices contains the list of devices that would be added
+	// DryRunDevices contains the list of data devices that would be added
 	// when dry_run is true. Only populated for DSL-based requests.
 	DryRunDevices []DryRunDevice `json:"dry_run_devices,omitempty" yaml:"dry_run_devices,omitempty"`
+	// DryRunWALDevices contains matched WAL backing block devices in dry-run mode.
+	DryRunWALDevices []DryRunDevice `json:"dry_run_wal_devices,omitempty" yaml:"dry_run_wal_devices,omitempty"`
+	// DryRunDBDevices contains matched DB backing block devices in dry-run mode.
+	DryRunDBDevices []DryRunDevice `json:"dry_run_db_devices,omitempty" yaml:"dry_run_db_devices,omitempty"`
+	// DryRunPartitions contains planned partition creation operations in dry-run mode.
+	DryRunPartitions []DryRunPartition `json:"dry_run_partitions,omitempty" yaml:"dry_run_partitions,omitempty"`
+	// DryRunAssignments maps each planned OSD to planned WAL/DB partition paths.
+	DryRunAssignments []DryRunAssignment `json:"dry_run_assignments,omitempty" yaml:"dry_run_assignments,omitempty"`
 }
 
 // DryRunDevice represents a device that would be added during a dry run.
@@ -43,6 +59,23 @@ type DryRunDevice struct {
 	Size   string `json:"size" yaml:"size"`
 	Type   string `json:"type" yaml:"type"`
 	Vendor string `json:"vendor" yaml:"vendor"`
+}
+
+// DryRunPartition describes a partition that would be created.
+type DryRunPartition struct {
+	Role      string `json:"role" yaml:"role"`
+	DiskPath  string `json:"disk_path" yaml:"disk_path"`
+	PartNum   uint64 `json:"part_num" yaml:"part_num"`
+	PartPath  string `json:"part_path" yaml:"part_path"`
+	PartSize  string `json:"part_size" yaml:"part_size"`
+	ForOSDIdx int    `json:"for_osd_idx" yaml:"for_osd_idx"`
+}
+
+// DryRunAssignment describes planned WAL/DB devices for a given OSD data device.
+type DryRunAssignment struct {
+	OSDDevice string `json:"osd_device" yaml:"osd_device"`
+	WALDevice string `json:"wal_device,omitempty" yaml:"wal_device,omitempty"`
+	DBDevice  string `json:"db_device,omitempty" yaml:"db_device,omitempty"`
 }
 
 // DisksDelete holds an OSD number and a flag for forcing the removal

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1034,42 +1035,627 @@ func (m *OSDManager) MatchDisksWithDSL(ctx context.Context, dslExpr string, dryR
 	return result, nil
 }
 
-// AddDisksWithDSL adds disks matching a DSL expression as OSDs.
-// If dryRun is true, returns matched devices without adding them.
-func (m *OSDManager) AddDisksWithDSL(ctx context.Context, dslExpr string, encrypt bool, wipe bool, dryRun bool) types.DiskAddResponse {
-	result, err := m.MatchDisksWithDSL(ctx, dslExpr, dryRun)
+// AddDisksWithDSL adds disks matching DSL expressions as OSDs.
+// Optional WAL/DB expressions are used to create and assign one partition per new OSD.
+func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExpr string, dbExpr string, walSize string, dbSize string, encrypt bool, wipe bool, dryRun bool) types.DiskAddResponse {
+	osdResult, err := m.MatchDisksWithDSL(ctx, osdExpr, dryRun)
 	if err != nil {
 		return types.DiskAddResponse{ValidationError: err.Error()}
 	}
 
-	// Return validation errors
-	if result.ValidationError != "" {
-		return types.DiskAddResponse{ValidationError: result.ValidationError}
+	if osdResult.ValidationError != "" {
+		return types.DiskAddResponse{ValidationError: osdResult.ValidationError}
 	}
 
-	// Handle dry-run mode
-	if dryRun {
-		return types.DiskAddResponse{DryRunDevices: result.DryRunDevices}
-	}
+	matchedOSDs := osdResult.MatchedDisks
+	sort.Slice(matchedOSDs, func(i, j int) bool {
+		return dsl.GetDevicePath(matchedOSDs[i]) < dsl.GetDevicePath(matchedOSDs[j])
+	})
 
-	// No devices matched
-	if len(result.MatchedDisks) == 0 {
+	if len(matchedOSDs) == 0 {
+		if dryRun {
+			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
+		}
 		return types.DiskAddResponse{}
 	}
 
-	// Prepare disk parameters for matched devices
-	disks := make([]types.DiskParameter, len(result.MatchedDisks))
-	for i, disk := range result.MatchedDisks {
-		disks[i] = types.DiskParameter{
+	if strings.TrimSpace(walExpr) == "" && strings.TrimSpace(dbExpr) == "" {
+		if dryRun {
+			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
+		}
+
+		disks := make([]types.DiskParameter, len(matchedOSDs))
+		for i, disk := range matchedOSDs {
+			disks[i] = types.DiskParameter{
+				Path:     dsl.GetDevicePath(disk),
+				Encrypt:  encrypt,
+				Wipe:     wipe,
+				LoopSize: 0,
+			}
+		}
+		return m.addBulkDisks(ctx, disks, nil, nil)
+	}
+
+	storage, err := m.storage.GetStorage()
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: fmt.Sprintf("failed to get storage resources: %v", err)}
+	}
+
+	clusterFSID, err := m.getClusterFSID(ctx)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	walCandidates, err := m.getWALDBCandidateDisks(ctx, storage, clusterFSID, wipe)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	matchedWALDisks, validationErr := m.matchDisksFromSet(walExpr, walCandidates)
+	if validationErr != "" {
+		return types.DiskAddResponse{ValidationError: validationErr}
+	}
+
+	matchedDBDisks, validationErr := m.matchDisksFromSet(dbExpr, walCandidates)
+	if validationErr != "" {
+		return types.DiskAddResponse{ValidationError: validationErr}
+	}
+
+	if err := validateNoDiskOverlap(matchedOSDs, matchedWALDisks, matchedDBDisks); err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	var walSizeBytes uint64
+	if walExpr != "" && len(matchedWALDisks) > 0 {
+		walSizeBytes, err = parsePartitionSize(walSize, "wal")
+		if err != nil {
+			return types.DiskAddResponse{ValidationError: err.Error()}
+		}
+	}
+
+	var dbSizeBytes uint64
+	if dbExpr != "" && len(matchedDBDisks) > 0 {
+		dbSizeBytes, err = parsePartitionSize(dbSize, "db")
+		if err != nil {
+			return types.DiskAddResponse{ValidationError: err.Error()}
+		}
+	}
+
+	walPlan, err := planRolePartitions("wal", matchedWALDisks, walSizeBytes, len(matchedOSDs), wipe)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	dbPlan, err := planRolePartitions("db", matchedDBDisks, dbSizeBytes, len(matchedOSDs), wipe)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	if dryRun {
+		resp := types.DiskAddResponse{
+			DryRunDevices:    osdResult.DryRunDevices,
+			DryRunWALDevices: makeDryRunDevices(matchedWALDisks),
+			DryRunDBDevices:  makeDryRunDevices(matchedDBDisks),
+		}
+		resp.DryRunPartitions = append(resp.DryRunPartitions, dryRunPartitionsFromPlan(walPlan)...)
+		resp.DryRunPartitions = append(resp.DryRunPartitions, dryRunPartitionsFromPlan(dbPlan)...)
+		resp.DryRunAssignments = makeDryRunAssignments(matchedOSDs, walPlan, dbPlan)
+		return resp
+	}
+
+	walPaths, err := m.createPlannedPartitions(walPlan, wipe)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	dbPaths, err := m.createPlannedPartitions(dbPlan, wipe)
+	if err != nil {
+		return types.DiskAddResponse{ValidationError: err.Error()}
+	}
+
+	ret := types.DiskAddResponse{ValidationError: ""}
+	for i, disk := range matchedOSDs {
+		data := types.DiskParameter{
 			Path:     dsl.GetDevicePath(disk),
 			Encrypt:  encrypt,
 			Wipe:     wipe,
 			LoopSize: 0,
 		}
+
+		var wal *types.DiskParameter
+		if len(walPaths) > i {
+			wal = &types.DiskParameter{Path: walPaths[i], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+		}
+
+		var db *types.DiskParameter
+		if len(dbPaths) > i {
+			db = &types.DiskParameter{Path: dbPaths[i], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+		}
+
+		ret.Reports = append(ret.Reports, m.addSingleDisk(ctx, data, wal, db))
 	}
 
-	// Add the matched disks (no WAL/DB support with DSL yet)
-	return m.addBulkDisks(ctx, disks, nil, nil)
+	return ret
+}
+
+type plannedPartition struct {
+	Role      string
+	DiskPath  string
+	DiskID    string
+	DiskDev   string
+	PartNum   uint64
+	PartPath  string
+	PartSize  uint64
+	ForOSDIdx int
+}
+
+func parsePartitionSize(size string, role string) (uint64, error) {
+	value, _, err := dsl.ParseNumberWithUnit(size)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s size %q: %w", role, size, err)
+	}
+
+	if value <= 0 {
+		return 0, fmt.Errorf("invalid %s size %q: must be greater than zero", role, size)
+	}
+
+	return uint64(value), nil
+}
+
+func getKernelPartitionPath(diskID string, partNum uint64) string {
+	if diskID == "" {
+		return ""
+	}
+
+	if len(diskID) > 0 && diskID[len(diskID)-1] >= '0' && diskID[len(diskID)-1] <= '9' {
+		return fmt.Sprintf("/dev/%sp%d", diskID, partNum)
+	}
+
+	return fmt.Sprintf("/dev/%s%d", diskID, partNum)
+}
+
+func expectedPartitionPath(disk api.ResourcesStorageDisk, partNum uint64) string {
+	if disk.DeviceID != "" {
+		return fmt.Sprintf("/dev/disk/by-id/%s-part%d", disk.DeviceID, partNum)
+	}
+
+	if disk.DevicePath != "" {
+		return fmt.Sprintf("/dev/disk/by-path/%s-part%d", disk.DevicePath, partNum)
+	}
+
+	return getKernelPartitionPath(disk.ID, partNum)
+}
+
+func (m *OSDManager) getClusterFSID(ctx context.Context) (string, error) {
+	cfg, err := GetConfigDb(ctx, interfaces.CephState{State: m.state})
+	if err != nil {
+		return "", fmt.Errorf("failed to read cluster config: %w", err)
+	}
+
+	fsid := strings.TrimSpace(cfg["fsid"])
+	if fsid == "" {
+		return "", fmt.Errorf("cluster fsid is not configured")
+	}
+
+	return fsid, nil
+}
+
+func (m *OSDManager) getWALDBCandidateDisks(ctx context.Context, storage *api.ResourcesStorage, clusterFSID string, wipe bool) ([]api.ResourcesStorageDisk, error) {
+	configuredDisks, err := database.OSDQuery.List(ctx, m.state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list configured disks: %w", err)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = ""
+	}
+
+	if idx := strings.Index(hostname, "."); idx > 0 {
+		hostname = hostname[:idx]
+	}
+
+	configuredPaths := map[string]struct{}{}
+	for _, configured := range configuredDisks {
+		if configured.Location != hostname {
+			continue
+		}
+		configuredPaths[configured.Path] = struct{}{}
+	}
+
+	candidates := make([]api.ResourcesStorageDisk, 0, len(storage.Disks))
+	for _, disk := range storage.Disks {
+		if disk.ReadOnly {
+			continue
+		}
+
+		devicePath := common.GetDevicePath(&disk)
+		if _, exists := configuredPaths[devicePath]; exists {
+			continue
+		}
+
+		if disk.Mounted || hasMountedPartitions(disk) {
+			continue
+		}
+
+		mounted, err := m.mountChecker.IsMounted(devicePath)
+		if err != nil {
+			logger.Warnf("Skipping WAL/DB candidate %s: failed to check mounted state: %v", devicePath, err)
+			continue
+		}
+		if mounted {
+			continue
+		}
+
+		ok, err := m.diskEligibleForWALDB(disk, clusterFSID, wipe)
+		if err != nil {
+			logger.Warnf("Skipping WAL/DB candidate %s: %v", devicePath, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+
+		candidates = append(candidates, disk)
+	}
+
+	return candidates, nil
+}
+
+func hasMountedPartitions(disk api.ResourcesStorageDisk) bool {
+	for _, part := range disk.Partitions {
+		if part.Mounted {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *OSDManager) diskEligibleForWALDB(disk api.ResourcesStorageDisk, clusterFSID string, wipe bool) (bool, error) {
+	if wipe {
+		return true, nil
+	}
+
+	devicePath := common.GetDevicePath(&disk)
+	isPristine, err := m.pristineChecker.IsPristineDisk(devicePath)
+	if err == nil && isPristine {
+		return true, nil
+	}
+
+	pathsToProbe := []string{devicePath}
+	for _, part := range disk.Partitions {
+		pathsToProbe = append(pathsToProbe, expectedPartitionPath(disk, part.Partition))
+	}
+
+	for _, path := range pathsToProbe {
+		fsid, err := m.getDeviceCephFSID(path)
+		if err != nil {
+			continue
+		}
+
+		if fsid == clusterFSID {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (m *OSDManager) getDeviceCephFSID(devicePath string) (string, error) {
+	output, err := m.runner.RunCommand("ceph-bluestore-tool", "show-label", "--dev", devicePath)
+	if err != nil {
+		return "", err
+	}
+
+	data := map[string]map[string]any{}
+	if err := json.Unmarshal([]byte(output), &data); err == nil {
+		for _, v := range data {
+			if fsidRaw, ok := v["ceph_fsid"]; ok {
+				if fsid, ok := fsidRaw.(string); ok && strings.TrimSpace(fsid) != "" {
+					return fsid, nil
+				}
+			}
+		}
+	}
+
+	re := regexp.MustCompile(`"ceph_fsid"\s*:\s*"([^"]+)"`)
+	match := re.FindStringSubmatch(output)
+	if len(match) == 2 {
+		return match[1], nil
+	}
+
+	return "", fmt.Errorf("ceph_fsid not found in bluestore label output")
+}
+
+func (m *OSDManager) matchDisksFromSet(expr string, disks []api.ResourcesStorageDisk) ([]api.ResourcesStorageDisk, string) {
+	if strings.TrimSpace(expr) == "" {
+		return nil, ""
+	}
+
+	parsedExpr, err := dsl.Parse(expr)
+	if err != nil {
+		return nil, fmt.Sprintf("invalid DSL expression: %v", err)
+	}
+
+	if err := dsl.Validate(parsedExpr); err != nil {
+		return nil, fmt.Sprintf("DSL validation error: %v", err)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = ""
+	}
+	if idx := strings.Index(hostname, "."); idx > 0 {
+		hostname = hostname[:idx]
+	}
+
+	matched, err := dsl.MatchDevices(parsedExpr, disks, hostname)
+	if err != nil {
+		return nil, fmt.Sprintf("DSL evaluation error: %v", err)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return dsl.GetDevicePath(matched[i]) < dsl.GetDevicePath(matched[j])
+	})
+
+	return matched, ""
+}
+
+func validateNoDiskOverlap(osdDisks, walDisks, dbDisks []api.ResourcesStorageDisk) error {
+	owned := map[string]string{}
+
+	add := func(role string, disks []api.ResourcesStorageDisk) error {
+		for _, disk := range disks {
+			path := dsl.GetDevicePath(disk)
+			if prev, ok := owned[path]; ok {
+				return fmt.Errorf("device overlap detected: %s is selected for both %s and %s", path, prev, role)
+			}
+			owned[path] = role
+		}
+		return nil
+	}
+
+	if err := add("osd", osdDisks); err != nil {
+		return err
+	}
+	if err := add("wal", walDisks); err != nil {
+		return err
+	}
+	if err := add("db", dbDisks); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func planRolePartitions(role string, disks []api.ResourcesStorageDisk, partSize uint64, osdCount int, wipe bool) ([]plannedPartition, error) {
+	if len(disks) == 0 || partSize == 0 || osdCount == 0 {
+		return nil, nil
+	}
+
+	type roleAlloc struct {
+		disk     api.ResourcesStorageDisk
+		path     string
+		nextPart uint64
+		maxParts int
+		assigned int
+	}
+
+	allocs := make([]roleAlloc, 0, len(disks))
+	totalCapacity := 0
+	for _, disk := range disks {
+		used := uint64(0)
+		maxPart := uint64(0)
+		if !wipe {
+			for _, part := range disk.Partitions {
+				used += part.Size
+				if part.Partition > maxPart {
+					maxPart = part.Partition
+				}
+			}
+		}
+
+		free := uint64(0)
+		if disk.Size > used {
+			free = disk.Size - used
+		}
+
+		maxParts := int(free / partSize)
+		if maxParts <= 0 {
+			continue
+		}
+
+		nextPart := maxPart + 1
+		if wipe {
+			nextPart = 1
+		}
+
+		allocs = append(allocs, roleAlloc{
+			disk:     disk,
+			path:     dsl.GetDevicePath(disk),
+			nextPart: nextPart,
+			maxParts: maxParts,
+		})
+		totalCapacity += maxParts
+	}
+
+	if totalCapacity < osdCount {
+		return nil, fmt.Errorf("insufficient %s capacity for %d OSDs: can place at most %d partitions of size %s", role, osdCount, totalCapacity, formatBytesIEC(int64(partSize)))
+	}
+
+	plan := make([]plannedPartition, 0, osdCount)
+	for i := 0; i < osdCount; i++ {
+		best := -1
+		for j := range allocs {
+			if allocs[j].assigned >= allocs[j].maxParts {
+				continue
+			}
+			if best == -1 || allocs[j].assigned < allocs[best].assigned || (allocs[j].assigned == allocs[best].assigned && allocs[j].path < allocs[best].path) {
+				best = j
+			}
+		}
+
+		if best == -1 {
+			return nil, fmt.Errorf("insufficient %s capacity for %d OSDs", role, osdCount)
+		}
+
+		partNum := allocs[best].nextPart
+		plan = append(plan, plannedPartition{
+			Role:      role,
+			DiskPath:  allocs[best].path,
+			DiskID:    allocs[best].disk.ID,
+			DiskDev:   allocs[best].disk.Device,
+			PartNum:   partNum,
+			PartPath:  expectedPartitionPath(allocs[best].disk, partNum),
+			PartSize:  partSize,
+			ForOSDIdx: i,
+		})
+
+		allocs[best].nextPart++
+		allocs[best].assigned++
+	}
+
+	sort.Slice(plan, func(i, j int) bool {
+		return plan[i].ForOSDIdx < plan[j].ForOSDIdx
+	})
+
+	return plan, nil
+}
+
+func makeDryRunDevices(disks []api.ResourcesStorageDisk) []types.DryRunDevice {
+	out := make([]types.DryRunDevice, len(disks))
+	for i, disk := range disks {
+		out[i] = types.DryRunDevice{
+			Path:   dsl.GetDevicePath(disk),
+			Model:  disk.Model,
+			Size:   formatBytesIEC(int64(disk.Size)),
+			Type:   disk.Type,
+			Vendor: extractVendor(disk.Model),
+		}
+	}
+	return out
+}
+
+func dryRunPartitionsFromPlan(plan []plannedPartition) []types.DryRunPartition {
+	out := make([]types.DryRunPartition, len(plan))
+	for i, p := range plan {
+		out[i] = types.DryRunPartition{
+			Role:      p.Role,
+			DiskPath:  p.DiskPath,
+			PartNum:   p.PartNum,
+			PartPath:  p.PartPath,
+			PartSize:  formatBytesIEC(int64(p.PartSize)),
+			ForOSDIdx: p.ForOSDIdx,
+		}
+	}
+	return out
+}
+
+func makeDryRunAssignments(osdDisks []api.ResourcesStorageDisk, walPlan, dbPlan []plannedPartition) []types.DryRunAssignment {
+	assignments := make([]types.DryRunAssignment, len(osdDisks))
+	for i, disk := range osdDisks {
+		assignments[i] = types.DryRunAssignment{OSDDevice: dsl.GetDevicePath(disk)}
+	}
+
+	for i, p := range walPlan {
+		if p.ForOSDIdx < len(assignments) {
+			assignments[p.ForOSDIdx].WALDevice = walPlan[i].PartPath
+		}
+	}
+
+	for i, p := range dbPlan {
+		if p.ForOSDIdx < len(assignments) {
+			assignments[p.ForOSDIdx].DBDevice = dbPlan[i].PartPath
+		}
+	}
+
+	return assignments
+}
+
+func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool) ([]string, error) {
+	if len(plan) == 0 {
+		return nil, nil
+	}
+
+	wiped := map[string]struct{}{}
+	paths := make([]string, len(plan))
+	for i, p := range plan {
+		if wipe {
+			if _, ok := wiped[p.DiskPath]; !ok {
+				if err := m.timeoutWipe(p.DiskPath); err != nil {
+					return nil, fmt.Errorf("failed to wipe %s backing disk %s: %w", p.Role, p.DiskPath, err)
+				}
+				wiped[p.DiskPath] = struct{}{}
+			}
+		}
+
+		sectors := (p.PartSize + 511) / 512
+		if sectors == 0 {
+			return nil, fmt.Errorf("invalid zero-size %s partition request", p.Role)
+		}
+
+		_, err := m.runner.RunCommand(
+			"sgdisk",
+			fmt.Sprintf("--new=%d:0:+%d", p.PartNum, sectors),
+			fmt.Sprintf("--typecode=%d:8300", p.PartNum),
+			p.DiskPath,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed creating %s partition %d on %s: %w", p.Role, p.PartNum, p.DiskPath, err)
+		}
+
+		resolved, err := m.waitForPartitionPath(p)
+		if err != nil {
+			return nil, err
+		}
+
+		paths[i] = resolved
+	}
+
+	return paths, nil
+}
+
+func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error) {
+	deadline := time.Now().Add(20 * time.Second)
+
+	for time.Now().Before(deadline) {
+		storage, err := m.storage.GetStorage()
+		if err == nil {
+			for _, disk := range storage.Disks {
+				if disk.Device != part.DiskDev {
+					continue
+				}
+				for _, p := range disk.Partitions {
+					if p.Partition == part.PartNum {
+						path := expectedPartitionPath(disk, p.Partition)
+						if path != "" {
+							if exists, _ := afero.Exists(m.fs, path); exists {
+								return path, nil
+							}
+						}
+
+						fallback := getKernelPartitionPath(disk.ID, p.Partition)
+						if fallback != "" {
+							if exists, _ := afero.Exists(m.fs, fallback); exists {
+								return fallback, nil
+							}
+						}
+					}
+				}
+			}
+		}
+
+		fallback := getKernelPartitionPath(part.DiskID, part.PartNum)
+		if fallback != "" {
+			if exists, _ := afero.Exists(m.fs, fallback); exists {
+				return fallback, nil
+			}
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return "", fmt.Errorf("timed out waiting for %s partition %d on %s", part.Role, part.PartNum, part.DiskPath)
 }
 
 // extractVendor extracts the vendor name from a model string.
@@ -1102,8 +1688,8 @@ func formatBytesIEC(bytes int64) string {
 }
 
 // AddDisksWithDSLWrapper is a public wrapper for DSL-based disk addition.
-func AddDisksWithDSL(ctx context.Context, s state.State, dslExpr string, encrypt bool, wipe bool, dryRun bool) types.DiskAddResponse {
-	return NewOSDManager(s).AddDisksWithDSL(ctx, dslExpr, encrypt, wipe, dryRun)
+func AddDisksWithDSL(ctx context.Context, s state.State, osdExpr string, walExpr string, dbExpr string, walSize string, dbSize string, encrypt bool, wipe bool, dryRun bool) types.DiskAddResponse {
+	return NewOSDManager(s).AddDisksWithDSL(ctx, osdExpr, walExpr, dbExpr, walSize, dbSize, encrypt, wipe, dryRun)
 }
 
 // AddLoopBackOSDs adds OSDs backed by loopback files using a one-off manager.

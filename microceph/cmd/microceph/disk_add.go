@@ -29,6 +29,10 @@ type cmdDiskAdd struct {
 	dbWipe         bool
 	flagAllDevices bool
 	flagOSDMatch   string
+	flagWALMatch   string
+	flagDBMatch    string
+	flagWALSize    string
+	flagDBSize     string
 	flagDryRun     bool
 }
 
@@ -53,6 +57,10 @@ Alternatively, use --osd-match with a DSL expression to select devices based on 
   microceph disk add --osd-match "eq(@type, 'nvme')"
   microceph disk add --osd-match "and(gt(@size, 100GiB), re('Samsung', @model))"
 
+Optionally, add --wal-match/--db-match and matching partition sizes to automatically
+create WAL/DB partitions and assign one partition per newly created OSD:
+  microceph disk add --osd-match "eq(@type, 'ssd')" --wal-match "eq(@type, 'nvme')" --wal-size 4GiB
+
 Available DSL predicates: and(), or(), not(), in(), re(), eq(), ne(), gt(), ge(), lt(), le()
 Available variables: @type, @vendor, @model, @size, @devnode, @host`,
 		RunE: c.Run,
@@ -68,7 +76,11 @@ Available variables: @type, @vendor, @model, @size, @devnode, @host`,
 	cmd.PersistentFlags().BoolVar(&c.dbWipe, "db-wipe", false, "Wipe the DB device prior to use")
 	cmd.PersistentFlags().BoolVar(&c.dbEncrypt, "db-encrypt", false, "Encrypt the DB device prior to use")
 	cmd.PersistentFlags().StringVar(&c.flagOSDMatch, "osd-match", "", "DSL expression to match devices for OSD creation")
-	cmd.PersistentFlags().BoolVar(&c.flagDryRun, "dry-run", false, "Show matched devices without adding them (requires --osd-match)")
+	cmd.PersistentFlags().StringVar(&c.flagWALMatch, "wal-match", "", "DSL expression to match backing devices used for WAL partitions")
+	cmd.PersistentFlags().StringVar(&c.flagDBMatch, "db-match", "", "DSL expression to match backing devices used for DB partitions")
+	cmd.PersistentFlags().StringVar(&c.flagWALSize, "wal-size", "", "WAL partition size when --wal-match is used (e.g. 4GiB)")
+	cmd.PersistentFlags().StringVar(&c.flagDBSize, "db-size", "", "DB partition size when --db-match is used (e.g. 20GiB)")
+	cmd.PersistentFlags().BoolVar(&c.flagDryRun, "dry-run", false, "Show matched devices and planned partitions without adding them (requires --osd-match)")
 
 	return cmd
 }
@@ -104,6 +116,10 @@ func (c *cmdDiskAdd) Run(cmd *cobra.Command, args []string) error {
 	if c.flagOSDMatch != "" {
 		// DSL-based device selection
 		req.OSDMatch = c.flagOSDMatch
+		req.WALMatch = c.flagWALMatch
+		req.DBMatch = c.flagDBMatch
+		req.WALSize = c.flagWALSize
+		req.DBSize = c.flagDBSize
 		req.DryRun = c.flagDryRun
 	} else if c.flagAllDevices {
 		disks, err := getUnpartitionedDisks(cli)
@@ -141,7 +157,7 @@ func (c *cmdDiskAdd) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Handle dry-run output
-	if c.flagDryRun && len(response.DryRunDevices) > 0 {
+	if c.flagDryRun {
 		return c.printDryRunOutput(response)
 	}
 
@@ -155,24 +171,50 @@ func (c *cmdDiskAdd) Run(cmd *cobra.Command, args []string) error {
 
 // validateFlags checks for invalid flag combinations.
 func (c *cmdDiskAdd) validateFlags(args []string) error {
-	// --osd-match is mutually exclusive with positional args
-	if c.flagOSDMatch != "" && len(args) > 0 {
-		return fmt.Errorf("--osd-match cannot be used with positional device arguments")
+	isMatchMode := c.flagOSDMatch != "" || c.flagWALMatch != "" || c.flagDBMatch != "" || c.flagWALSize != "" || c.flagDBSize != ""
+
+	// --osd-match is mandatory for match mode.
+	if isMatchMode && c.flagOSDMatch == "" {
+		return fmt.Errorf("--osd-match is required when using --wal-match/--db-match/--wal-size/--db-size")
 	}
 
-	// --osd-match is mutually exclusive with --all-available
-	if c.flagOSDMatch != "" && c.flagAllDevices {
-		return fmt.Errorf("--osd-match cannot be used with --all-available")
+	// Match mode is mutually exclusive with positional args.
+	if isMatchMode && len(args) > 0 {
+		return fmt.Errorf("--osd-match/--wal-match/--db-match cannot be used with positional device arguments")
 	}
 
-	// --dry-run requires --osd-match
+	// Match mode is mutually exclusive with --all-available.
+	if isMatchMode && c.flagAllDevices {
+		return fmt.Errorf("--osd-match/--wal-match/--db-match cannot be used with --all-available")
+	}
+
+	// --dry-run requires --osd-match.
 	if c.flagDryRun && c.flagOSDMatch == "" {
 		return fmt.Errorf("--dry-run requires --osd-match")
 	}
 
-	// WAL/DB devices are not yet supported with --osd-match (Phase 2)
-	if c.flagOSDMatch != "" && (c.walDevice != "" || c.dbDevice != "") {
-		return fmt.Errorf("--wal-device and --db-device are not supported with --osd-match in this version")
+	// --wal-match requires --wal-size.
+	if c.flagWALMatch != "" && c.flagWALSize == "" {
+		return fmt.Errorf("--wal-size is required when --wal-match is set")
+	}
+
+	// --db-match requires --db-size.
+	if c.flagDBMatch != "" && c.flagDBSize == "" {
+		return fmt.Errorf("--db-size is required when --db-match is set")
+	}
+
+	// Standalone wal/db size values are not accepted.
+	if c.flagWALSize != "" && c.flagWALMatch == "" {
+		return fmt.Errorf("--wal-size requires --wal-match")
+	}
+
+	if c.flagDBSize != "" && c.flagDBMatch == "" {
+		return fmt.Errorf("--db-size requires --db-match")
+	}
+
+	// Positional WAL/DB device flags are not supported in match mode.
+	if isMatchMode && (c.walDevice != "" || c.dbDevice != "") {
+		return fmt.Errorf("--wal-device and --db-device cannot be used with --osd-match/--wal-match/--db-match")
 	}
 
 	return nil
@@ -193,7 +235,61 @@ func (c *cmdDiskAdd) printDryRunOutput(response types.DiskAddResponse) error {
 
 	header := []string{"PATH", "MODEL", "SIZE", "TYPE"}
 	sort.Sort(lxdCmd.SortColumnsNaturally(data))
-	return lxdCmd.RenderTable(lxdCmd.TableFormatTable, header, data, data)
+	if err := lxdCmd.RenderTable(lxdCmd.TableFormatTable, header, data, data); err != nil {
+		return err
+	}
+
+	if len(response.DryRunWALDevices) > 0 {
+		fmt.Println("\nMatched WAL backing devices:")
+		walData := make([][]string, len(response.DryRunWALDevices))
+		for i, dev := range response.DryRunWALDevices {
+			walData[i] = []string{dev.Path, dev.Model, dev.Size, dev.Type}
+		}
+		sort.Sort(lxdCmd.SortColumnsNaturally(walData))
+		if err := lxdCmd.RenderTable(lxdCmd.TableFormatTable, header, walData, walData); err != nil {
+			return err
+		}
+	}
+
+	if len(response.DryRunDBDevices) > 0 {
+		fmt.Println("\nMatched DB backing devices:")
+		dbData := make([][]string, len(response.DryRunDBDevices))
+		for i, dev := range response.DryRunDBDevices {
+			dbData[i] = []string{dev.Path, dev.Model, dev.Size, dev.Type}
+		}
+		sort.Sort(lxdCmd.SortColumnsNaturally(dbData))
+		if err := lxdCmd.RenderTable(lxdCmd.TableFormatTable, header, dbData, dbData); err != nil {
+			return err
+		}
+	}
+
+	if len(response.DryRunPartitions) > 0 {
+		fmt.Println("\nPlanned partition creation:")
+		partData := make([][]string, len(response.DryRunPartitions))
+		for i, p := range response.DryRunPartitions {
+			partData[i] = []string{p.Role, p.DiskPath, fmt.Sprintf("%d", p.PartNum), p.PartPath, p.PartSize, fmt.Sprintf("%d", p.ForOSDIdx)}
+		}
+		partHeader := []string{"ROLE", "DISK", "PART", "PARTITION_PATH", "SIZE", "OSD_IDX"}
+		sort.Sort(lxdCmd.SortColumnsNaturally(partData))
+		if err := lxdCmd.RenderTable(lxdCmd.TableFormatTable, partHeader, partData, partData); err != nil {
+			return err
+		}
+	}
+
+	if len(response.DryRunAssignments) > 0 {
+		fmt.Println("\nPlanned OSD assignments:")
+		assignData := make([][]string, len(response.DryRunAssignments))
+		for i, a := range response.DryRunAssignments {
+			assignData[i] = []string{a.OSDDevice, a.WALDevice, a.DBDevice}
+		}
+		assignHeader := []string{"OSD_DEVICE", "WAL_PARTITION", "DB_PARTITION"}
+		sort.Sort(lxdCmd.SortColumnsNaturally(assignData))
+		if err := lxdCmd.RenderTable(lxdCmd.TableFormatTable, assignHeader, assignData, assignData); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func printAddDiskFailures(response types.DiskAddResponse) error {

@@ -66,12 +66,16 @@ Flags:
    --all-available         add all available devices as OSDs
    --db-device string      The device used for the DB
    --db-encrypt            Encrypt the DB device prior to use
+   --db-match string       DSL expression to match backing devices for DB partitions
+   --db-size string        DB partition size when --db-match is used (for example 20GiB)
    --db-wipe               Wipe the DB device prior to use
-   --dry-run               Show matched devices without adding them (requires --osd-match)
+   --dry-run               Show matched devices and planned partitions without adding them (requires --osd-match)
    --encrypt               Encrypt the disk prior to use (only block devices)
    --osd-match string      DSL expression to match devices for OSD creation
    --wal-device string     The device used for WAL
    --wal-encrypt           Encrypt the WAL device prior to use
+   --wal-match string      DSL expression to match backing devices for WAL partitions
+   --wal-size string       WAL partition size when --wal-match is used (for example 4GiB)
    --wal-wipe              Wipe the WAL device prior to use
    --wipe                  Wipe the disk prior to use
 
@@ -136,7 +140,9 @@ Numbers and units must be written without any space between them (e.g., ``100GiB
 
 Limitations:
 
-- ``--osd-match`` cannot be used together with ``--wal-device`` or ``--db-device``.
+- ``--osd-match`` cannot be used together with positional device arguments.
+- Match mode flags (``--osd-match``, ``--wal-match``, ``--db-match``) cannot be mixed with ``--all-available``.
+- ``--wal-device``/``--db-device`` cannot be combined with match mode flags.
 
 
 ``list``

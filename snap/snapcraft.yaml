@@ -270,6 +270,7 @@ parts:
       # Utilities
       - coreutils
       - util-linux
+      - gdisk
       - uuid-runtime
       - python3-setuptools
       - python3-packaging
@@ -300,6 +301,7 @@ parts:
       - bin/truncate
       - bin/uuidgen
       - bin/findmnt
+      - bin/sgdisk
       - lib/*/ceph
       - lib/*/libaio.so*
       - lib/*/libasn1.so*
