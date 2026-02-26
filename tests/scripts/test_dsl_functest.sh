@@ -428,7 +428,9 @@ function test_dsl_pristine_check() {
     fi
 
     local test_disk="$available_disks"
-    echo "Using disk for pristine test: $test_disk"
+    local resolved_disk
+    resolved_disk=$(vm_exec readlink -f "$test_disk")
+    echo "Using disk for pristine test: $test_disk (resolved: $resolved_disk)"
 
     # Make the disk non-pristine by writing some data to it
     echo "Making disk non-pristine..."
@@ -436,8 +438,8 @@ function test_dsl_pristine_check() {
 
     # Try to add via DSL without --wipe - should fail pristine check
     echo "Attempting to add non-pristine disk via DSL (should fail)..."
-    # Use a DSL expression that matches the specific disk path
-    dsl_pristine_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$test_disk')" 2>&1) || true
+    # @devnode uses kernel path (e.g. /dev/sdb), so match against resolved path.
+    dsl_pristine_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$resolved_disk')" 2>&1) || true
     echo "Result: $dsl_pristine_result"
 
     if echo "$dsl_pristine_result" | grep -qi "not pristine\|pristine check"; then
@@ -463,7 +465,9 @@ function test_dsl_pristine_with_wipe() {
     fi
 
     local test_disk="$available_disks"
-    echo "Using disk for pristine+wipe test: $test_disk"
+    local resolved_disk
+    resolved_disk=$(vm_exec readlink -f "$test_disk")
+    echo "Using disk for pristine+wipe test: $test_disk (resolved: $resolved_disk)"
 
     # Ensure disk is non-pristine
     echo "Ensuring disk is non-pristine..."
@@ -475,7 +479,7 @@ function test_dsl_pristine_with_wipe() {
 
     # Try to add via DSL with --wipe - should succeed
     echo "Attempting to add non-pristine disk via DSL with --wipe (should succeed)..."
-    dsl_wipe_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$test_disk')" --wipe 2>&1) || true
+    dsl_wipe_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$resolved_disk')" --wipe 2>&1) || true
     echo "Result: $dsl_wipe_result"
 
     # Wait for OSD to come up
