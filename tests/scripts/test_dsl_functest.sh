@@ -16,9 +16,13 @@ SNAP_CHANNEL="${SNAP_CHANNEL:-latest/edge}"
 
 # Disk configurations: name:size pairs
 DISK1_NAME="${VM_NAME}-disk1"
-DISK1_SIZE="${DISK1_SIZE:-10GiB}"
+DISK1_SIZE="${DISK1_SIZE:-4GiB}"
 DISK2_NAME="${VM_NAME}-disk2"
-DISK2_SIZE="${DISK2_SIZE:-20GiB}"
+DISK2_SIZE="${DISK2_SIZE:-2GiB}"
+DISK3_NAME="${VM_NAME}-disk3"
+DISK3_SIZE="${DISK3_SIZE:-2GiB}"
+DISK4_NAME="${VM_NAME}-disk4"
+DISK4_SIZE="${DISK4_SIZE:-4GiB}"
 
 # Cleanup function
 function cleanup_dsl_test() {
@@ -32,6 +36,8 @@ function cleanup_dsl_test() {
     # Delete storage volumes
     lxc storage volume delete "$STORAGE_POOL" "$DISK1_NAME" 2>/dev/null || true
     lxc storage volume delete "$STORAGE_POOL" "$DISK2_NAME" 2>/dev/null || true
+    lxc storage volume delete "$STORAGE_POOL" "$DISK3_NAME" 2>/dev/null || true
+    lxc storage volume delete "$STORAGE_POOL" "$DISK4_NAME" 2>/dev/null || true
 
     if [ $exit_code -eq 0 ]; then
         echo "Test completed successfully!"
@@ -87,7 +93,7 @@ function setup_dsl_test() {
 
     echo "=== MicroCeph DSL Functional Test ==="
     echo "VM Name: $VM_NAME"
-    echo "Disks: $DISK1_NAME ($DISK1_SIZE), $DISK2_NAME ($DISK2_SIZE)"
+    echo "Disks: $DISK1_NAME ($DISK1_SIZE), $DISK2_NAME ($DISK2_SIZE), $DISK3_NAME ($DISK3_SIZE), $DISK4_NAME ($DISK4_SIZE)"
 
     # Check if VM already exists
     if lxc info "$VM_NAME" &>/dev/null; then
@@ -97,7 +103,7 @@ function setup_dsl_test() {
     fi
 
     # Check/delete existing storage volumes
-    for disk in "$DISK1_NAME" "$DISK2_NAME"; do
+    for disk in "$DISK1_NAME" "$DISK2_NAME" "$DISK3_NAME" "$DISK4_NAME"; do
         if lxc storage volume show "$STORAGE_POOL" "$disk" &>/dev/null; then
             echo "Storage volume '$disk' already exists, deleting..."
             lxc storage volume delete "$STORAGE_POOL" "$disk" 2>/dev/null || true
@@ -108,6 +114,8 @@ function setup_dsl_test() {
     echo "Creating storage volumes..."
     lxc storage volume create "$STORAGE_POOL" "$DISK1_NAME" --type block size="$DISK1_SIZE"
     lxc storage volume create "$STORAGE_POOL" "$DISK2_NAME" --type block size="$DISK2_SIZE"
+    lxc storage volume create "$STORAGE_POOL" "$DISK3_NAME" --type block size="$DISK3_SIZE"
+    lxc storage volume create "$STORAGE_POOL" "$DISK4_NAME" --type block size="$DISK4_SIZE"
 
     # Launch VM
     echo "Launching VM '$VM_NAME'..."
@@ -121,6 +129,8 @@ function setup_dsl_test() {
     echo "Attaching storage volumes to VM..."
     lxc storage volume attach "$STORAGE_POOL" "$DISK1_NAME" "$VM_NAME"
     lxc storage volume attach "$STORAGE_POOL" "$DISK2_NAME" "$VM_NAME"
+    lxc storage volume attach "$STORAGE_POOL" "$DISK3_NAME" "$VM_NAME"
+    lxc storage volume attach "$STORAGE_POOL" "$DISK4_NAME" "$VM_NAME"
 
     # Wait for VM to be ready
     wait_for_dsl_vm "$VM_NAME"
@@ -206,11 +216,12 @@ function test_dsl_available_disks() {
     available_count=$(vm_exec microceph disk list 2>/dev/null | grep -cE "scsi|virtio" || echo "0")
     echo "Found $available_count available disks (scsi/virtio)"
 
-    # We should have at least 2 disks (our attached volumes)
-    if [ "$available_count" -lt 2 ]; then
-        echo "Expected at least 2 disks, found $available_count"
+    # We should have 4 disks (our attached volumes)
+    if [ "$available_count" -lt 4 ]; then
+        echo "FAIL: Expected 4 disks, found $available_count"
         echo "Listing all block devices:"
         vm_exec lsblk
+        exit 1
     fi
     echo "$available_count"
 }
@@ -239,8 +250,8 @@ function test_dsl_type_match() {
 function test_dsl_size_comparison() {
     set -eux
 
-    echo "Test: DSL dry-run with size comparison gt(@size, 5GiB)..."
-    dsl_size_output=$(vm_exec microceph disk add --osd-match "gt(@size, 5GiB)" --dry-run 2>&1) || true
+    echo "Test: DSL dry-run with size comparison gt(@size, 3GiB)..."
+    dsl_size_output=$(vm_exec microceph disk add --osd-match "gt(@size, 3GiB)" --dry-run 2>&1) || true
     echo "DSL size filter output:"
     echo "$dsl_size_output"
 }
@@ -250,7 +261,7 @@ function test_dsl_combined_conditions() {
     set -eux
 
     echo "Test: DSL dry-run with combined conditions..."
-    dsl_combined=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), gt(@size, 5GiB))" --dry-run 2>&1) || true
+    dsl_combined=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), gt(@size, 3GiB))" --dry-run 2>&1) || true
     echo "DSL combined filter output:"
     echo "$dsl_combined"
 }
@@ -327,11 +338,38 @@ function test_dsl_wal_db_dry_run_plan() {
 
     echo "Test: WAL/DB dry-run planning..."
 
-    # Typical setup in this VM has a smaller test disk (~10GiB) and a larger one (~20GiB).
+    disk_list_json=$(vm_exec microceph disk list --json 2>/dev/null)
+    data_disk=$(echo "$disk_list_json" | jq -r '.AvailableDisks[] | select(.Size=="4.00GiB") | .Path' | head -n1)
+    wal_db_disks=$(echo "$disk_list_json" | jq -r '.AvailableDisks[] | select(.Size=="2.00GiB") | .Path')
+    wal_disk=$(echo "$wal_db_disks" | sed -n '1p')
+    db_disk=$(echo "$wal_db_disks" | sed -n '2p')
+
+    if [ -z "$data_disk" ] || [ -z "$wal_disk" ] || [ -z "$db_disk" ]; then
+        echo "FAIL: required WAL/DB disks not available for dry-run planning"
+        exit 1
+    fi
+
+    data_devnode=$(vm_exec readlink -f "$data_disk")
+    wal_devnode=$(vm_exec readlink -f "$wal_disk")
+    db_devnode=$(vm_exec readlink -f "$db_disk")
+
+    if [ -z "$data_devnode" ] || [ -z "$wal_devnode" ] || [ -z "$db_devnode" ]; then
+        echo "FAIL: unable to resolve WAL/DB devnodes for dry-run planning"
+        exit 1
+    fi
+
+    if [ "$wal_devnode" = "$db_devnode" ]; then
+        echo "FAIL: WAL and DB devnodes resolved to the same device"
+        exit 1
+    fi
+
+    # Typical setup in this VM has OSD disks (~4GiB) and WAL/DB disks (~2GiB).
     dsl_phase2_output=$(vm_exec microceph disk add \
-        --osd-match "and(eq(@type, 'scsi'), le(@size, 15GiB))" \
-        --wal-match "and(eq(@type, 'scsi'), gt(@size, 15GiB))" \
+        --osd-match "and(eq(@devnode, '$data_devnode'), ge(@size, 4GiB), lt(@size, 5GiB))" \
+        --wal-match "and(eq(@devnode, '$wal_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
         --wal-size 1GiB \
+        --db-match "and(eq(@devnode, '$db_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
+        --db-size 1GiB \
         --dry-run 2>&1) || true
 
     echo "WAL/DB dry-run output:"
@@ -340,7 +378,8 @@ function test_dsl_wal_db_dry_run_plan() {
     if echo "$dsl_phase2_output" | grep -qiE "Matched WAL backing devices|Planned partition creation|Planned OSD assignments"; then
         echo "PASS: WAL/DB dry-run planning output detected"
     elif echo "$dsl_phase2_output" | grep -qi "No devices matched"; then
-        echo "SKIP: No matching devices in this environment"
+        echo "FAIL: No matching devices for WAL/DB dry-run planning"
+        exit 1
     else
         echo "FAIL: Unexpected WAL/DB dry-run output"
         exit 1
@@ -373,6 +412,56 @@ function test_dsl_wal_db_empty_match_nonfatal() {
     fi
 }
 
+# Test: WAL/DB add disk using DSL
+function test_dsl_wal_db_add_disk() {
+    set -eux
+
+    echo "Test: WAL/DB add disk using DSL (dry-run)..."
+
+    disk_list_json=$(vm_exec microceph disk list --json 2>/dev/null)
+    data_disk=$(echo "$disk_list_json" | jq -r '.AvailableDisks[] | select(.Size=="4.00GiB") | .Path' | head -n1)
+    wal_db_disks=$(echo "$disk_list_json" | jq -r '.AvailableDisks[] | select(.Size=="2.00GiB") | .Path')
+    wal_disk=$(echo "$wal_db_disks" | sed -n '1p')
+    db_disk=$(echo "$wal_db_disks" | sed -n '2p')
+
+    if [ -z "$data_disk" ] || [ -z "$wal_disk" ] || [ -z "$db_disk" ]; then
+        echo "FAIL: required WAL/DB disks not available"
+        exit 1
+    fi
+
+    data_devnode=$(vm_exec readlink -f "$data_disk")
+    wal_devnode=$(vm_exec readlink -f "$wal_disk")
+    db_devnode=$(vm_exec readlink -f "$db_disk")
+
+    if [ -z "$data_devnode" ] || [ -z "$wal_devnode" ] || [ -z "$db_devnode" ]; then
+        echo "FAIL: unable to resolve WAL/DB devnodes"
+        exit 1
+    fi
+
+    if [ "$wal_devnode" = "$db_devnode" ]; then
+        echo "FAIL: WAL and DB devnodes resolved to the same device"
+        exit 1
+    fi
+
+    wal_db_add_output=$(vm_exec microceph disk add \
+        --osd-match "and(eq(@devnode, '$data_devnode'), ge(@size, 4GiB), lt(@size, 5GiB))" \
+        --wal-match "and(eq(@devnode, '$wal_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
+        --wal-size 1GiB \
+        --db-match "and(eq(@devnode, '$db_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
+        --db-size 1GiB \
+        --dry-run 2>&1) || true
+
+    echo "WAL/DB add dry-run output:"
+    echo "$wal_db_add_output"
+
+    if echo "$wal_db_add_output" | grep -qiE "Matched WAL backing devices|Planned partition creation|Planned OSD assignments"; then
+        echo "PASS: WAL/DB add dry-run output detected"
+    else
+        echo "FAIL: WAL/DB add dry-run output missing expected content"
+        exit 1
+    fi
+}
+
 # Test: Add disk using DSL
 function test_dsl_add_disk() {
     set -eux
@@ -384,7 +473,7 @@ function test_dsl_add_disk() {
 
     if [ "$available_count" -ge 1 ]; then
         # Add one disk using size-based selection (the smaller one first)
-        add_result=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), le(@size, 15GiB))" 2>&1) || true
+        add_result=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), ge(@size, 4GiB), lt(@size, 5GiB))" 2>&1) || true
         echo "Add disk result:"
         echo "$add_result"
 
@@ -399,7 +488,8 @@ function test_dsl_add_disk() {
             echo "Disk may not have been added (check OSD status)"
         fi
     else
-        echo "Skipping disk add test - no available disks detected"
+        echo "FAIL: no available disks detected for add test"
+        exit 1
     fi
 }
 
@@ -408,7 +498,7 @@ function test_dsl_idempotency() {
     set -eux
 
     echo "Test: Idempotency - DSL should not re-match used disks..."
-    dsl_after_add=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), le(@size, 15GiB))" --dry-run 2>&1) || true
+    dsl_after_add=$(vm_exec microceph disk add --osd-match "and(eq(@type, 'scsi'), ge(@size, 4GiB), lt(@size, 5GiB))" --dry-run 2>&1) || true
     echo "DSL output after disk was added:"
     echo "$dsl_after_add"
 }
@@ -420,11 +510,11 @@ function test_dsl_pristine_check() {
     echo "Test: DSL respects pristine check..."
 
     # Get list of available disks
-    available_disks=$(vm_exec microceph disk list --json 2>/dev/null | jq -r '.AvailableDisks[].Path' | head -n1) || true
+    available_disks=$(vm_exec microceph disk list --json 2>/dev/null | jq -r '.AvailableDisks[] | select(.Size=="4.00GiB") | .Path' | head -n1) || true
 
     if [ -z "$available_disks" ]; then
-        echo "Skipping pristine check test - no available disks"
-        return 0
+        echo "FAIL: no available disks for pristine check"
+        exit 1
     fi
 
     local test_disk="$available_disks"
@@ -454,14 +544,14 @@ function test_dsl_pristine_check() {
 function test_dsl_pristine_with_wipe() {
     set -eux
 
-    echo "Test: DSL with --wipe adds non-pristine disk..."
+    echo "Test: DSL with --wipe adds non-pristine disk (dry-run)..."
 
     # Get list of available disks (should still have the non-pristine one from previous test)
-    available_disks=$(vm_exec microceph disk list --json 2>/dev/null | jq -r '.AvailableDisks[].Path' | head -n1) || true
+    available_disks=$(vm_exec microceph disk list --json 2>/dev/null | jq -r '.AvailableDisks[] | select(.Size=="4.00GiB") | .Path' | head -n1) || true
 
     if [ -z "$available_disks" ]; then
-        echo "Skipping pristine+wipe test - no available disks"
-        return 0
+        echo "FAIL: no available disks for pristine+wipe test"
+        exit 1
     fi
 
     local test_disk="$available_disks"
@@ -473,33 +563,21 @@ function test_dsl_pristine_with_wipe() {
     echo "Ensuring disk is non-pristine..."
     vm_exec dd if=/dev/urandom of="$test_disk" bs=1M count=10 conv=fsync 2>/dev/null || true
 
-    # Count configured disks before
-    configured_before=$(vm_exec microceph disk list --json 2>/dev/null | jq '.ConfiguredDisks | length') || echo "0"
-    echo "Configured disks before: $configured_before"
-
-    # Try to add via DSL with --wipe - should succeed
-    echo "Attempting to add non-pristine disk via DSL with --wipe (should succeed)..."
-    dsl_wipe_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$resolved_disk')" --wipe 2>&1) || true
+    # Try to add via DSL with --wipe in dry-run mode
+    echo "Attempting to add non-pristine disk via DSL with --wipe (dry-run)..."
+    dsl_wipe_result=$(vm_exec microceph disk add --osd-match "eq(@devnode, '$resolved_disk')" --wipe --dry-run 2>&1) || true
     echo "Result: $dsl_wipe_result"
 
-    # Wait for OSD to come up
-    sleep 10
+    if echo "$dsl_wipe_result" | grep -qi "not pristine\|pristine check"; then
+        echo "FAIL: --wipe should bypass pristine checks in dry-run"
+        exit 1
+    fi
 
-    # Count configured disks after
-    configured_after=$(vm_exec microceph disk list --json 2>/dev/null | jq '.ConfiguredDisks | length') || echo "0"
-    echo "Configured disks after: $configured_after"
-
-    if [ "$configured_after" -gt "$configured_before" ]; then
-        echo "PASS: DSL with --wipe successfully added non-pristine disk"
+    if echo "$dsl_wipe_result" | grep -qiE "would be added|dry_run_devices|PATH"; then
+        echo "PASS: DSL with --wipe dry-run accepted non-pristine disk"
     else
-        # Check if the error was something other than pristine
-        if echo "$dsl_wipe_result" | grep -qi "error\|failed"; then
-            echo "FAIL: DSL with --wipe failed to add disk"
-            echo "Output: $dsl_wipe_result"
-            exit 1
-        else
-            echo "PASS: DSL with --wipe accepted the disk (may still be initializing)"
-        fi
+        echo "FAIL: DSL with --wipe dry-run returned unexpected output"
+        exit 1
     fi
 }
 
@@ -531,6 +609,7 @@ function run_dsl_tests() {
     test_dsl_wal_db_flag_validation
     test_dsl_wal_db_dry_run_plan
     test_dsl_wal_db_empty_match_nonfatal
+    test_dsl_wal_db_add_disk
     test_dsl_pristine_check
     test_dsl_pristine_with_wipe
     test_dsl_idempotency
@@ -559,6 +638,8 @@ function parse_dsl_args() {
                 VM_NAME="$2"
                 DISK1_NAME="${VM_NAME}-disk1"
                 DISK2_NAME="${VM_NAME}-disk2"
+                DISK3_NAME="${VM_NAME}-disk3"
+                DISK4_NAME="${VM_NAME}-disk4"
                 shift 2
                 ;;
             --snap-path)

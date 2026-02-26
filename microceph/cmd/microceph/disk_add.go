@@ -222,6 +222,10 @@ func (c *cmdDiskAdd) validateFlags(args []string) error {
 
 // printDryRunOutput prints the dry-run results in a tabulated format.
 func (c *cmdDiskAdd) printDryRunOutput(response types.DiskAddResponse) error {
+	if response.ValidationError != "" {
+		return fmt.Errorf(response.ValidationError)
+	}
+
 	if len(response.DryRunDevices) == 0 {
 		fmt.Println("No devices matched the expression")
 		return nil

@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/canonical/microceph/microceph/api/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -82,5 +83,14 @@ func TestDiskAddValidateFlags(t *testing.T) {
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 		})
+	}
+}
+
+func TestPrintDryRunOutputFailsOnValidationError(t *testing.T) {
+	cmd := cmdDiskAdd{}
+
+	err := cmd.printDryRunOutput(types.DiskAddResponse{ValidationError: "invalid DSL expression"})
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "invalid DSL expression")
 	}
 }

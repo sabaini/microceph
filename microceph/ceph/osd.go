@@ -1052,6 +1052,29 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 		return dsl.GetDevicePath(matchedOSDs[i]) < dsl.GetDevicePath(matchedOSDs[j])
 	})
 
+	trimmedWALExpr := strings.TrimSpace(walExpr)
+	trimmedDBExpr := strings.TrimSpace(dbExpr)
+
+	if trimmedWALExpr != "" {
+		if _, validationErr := m.matchDisksFromSet(trimmedWALExpr, []api.ResourcesStorageDisk{}); validationErr != "" {
+			return types.DiskAddResponse{ValidationError: validationErr}
+		}
+
+		if _, err := parsePartitionSize(walSize, "wal"); err != nil {
+			return types.DiskAddResponse{ValidationError: err.Error()}
+		}
+	}
+
+	if trimmedDBExpr != "" {
+		if _, validationErr := m.matchDisksFromSet(trimmedDBExpr, []api.ResourcesStorageDisk{}); validationErr != "" {
+			return types.DiskAddResponse{ValidationError: validationErr}
+		}
+
+		if _, err := parsePartitionSize(dbSize, "db"); err != nil {
+			return types.DiskAddResponse{ValidationError: err.Error()}
+		}
+	}
+
 	if len(matchedOSDs) == 0 {
 		if dryRun {
 			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
@@ -1059,7 +1082,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 		return types.DiskAddResponse{}
 	}
 
-	if strings.TrimSpace(walExpr) == "" && strings.TrimSpace(dbExpr) == "" {
+	if trimmedWALExpr == "" && trimmedDBExpr == "" {
 		if dryRun {
 			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
 		}
@@ -1106,7 +1129,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 	}
 
 	var walSizeBytes uint64
-	if walExpr != "" && len(matchedWALDisks) > 0 {
+	if trimmedWALExpr != "" && len(matchedWALDisks) > 0 {
 		walSizeBytes, err = parsePartitionSize(walSize, "wal")
 		if err != nil {
 			return types.DiskAddResponse{ValidationError: err.Error()}
@@ -1114,7 +1137,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 	}
 
 	var dbSizeBytes uint64
-	if dbExpr != "" && len(matchedDBDisks) > 0 {
+	if trimmedDBExpr != "" && len(matchedDBDisks) > 0 {
 		dbSizeBytes, err = parsePartitionSize(dbSize, "db")
 		if err != nil {
 			return types.DiskAddResponse{ValidationError: err.Error()}
@@ -1327,18 +1350,26 @@ func (m *OSDManager) diskEligibleForWALDB(disk api.ResourcesStorageDisk, cluster
 		pathsToProbe = append(pathsToProbe, expectedPartitionPath(disk, part.Partition))
 	}
 
+	foundClusterFSID := false
 	for _, path := range pathsToProbe {
 		fsid, err := m.getDeviceCephFSID(path)
 		if err != nil {
 			continue
 		}
 
-		if fsid == clusterFSID {
-			return true, nil
+		fsid = strings.TrimSpace(fsid)
+		if fsid == "" {
+			continue
 		}
+
+		if fsid != clusterFSID {
+			return false, nil
+		}
+
+		foundClusterFSID = true
 	}
 
-	return false, nil
+	return foundClusterFSID, nil
 }
 
 func (m *OSDManager) getDeviceCephFSID(devicePath string) (string, error) {
