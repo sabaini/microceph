@@ -1583,7 +1583,13 @@ function verify_mount_check() {
     fi
 }
 
-run="${1}"
-shift
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    run="${1-}"
+    if [[ -z "$run" ]]; then
+        echo "Usage: $0 <function> [args...]"
+        exit 1
+    fi
+    shift
 
-$run "$@"
+    "$run" "$@"
+fi
