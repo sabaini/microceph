@@ -13,6 +13,7 @@ MEM="${MEM:-4GiB}"
 STORAGE_POOL="${STORAGE_POOL:-default}"
 SNAP_PATH="${SNAP_PATH:-}"  # Path to local snap file, empty means use store
 SNAP_CHANNEL="${SNAP_CHANNEL:-latest/edge}"
+NO_CLEANUP="${NO_CLEANUP:-0}"
 
 # Disk configurations: name:size pairs
 DISK1_NAME="${VM_NAME}-disk1"
@@ -87,6 +88,20 @@ function vm_exec_check() {
     return 0
 }
 
+# Disable multipath in VM (LXD disks share WWIDs and get grouped as multipath members)
+function disable_multipath_in_vm() {
+    set -eux
+
+    echo "Disabling multipathd in VM..."
+    vm_exec systemctl stop multipathd multipathd.socket || true
+    vm_exec systemctl disable multipathd multipathd.socket || true
+    vm_exec systemctl mask multipathd multipathd.socket || true
+
+    # Flush any existing multipath maps so devices present as plain /dev/sdX.
+    vm_exec multipath -F || true
+    vm_exec udevadm settle || true
+}
+
 # Setup DSL test environment
 function setup_dsl_test() {
     set -eux
@@ -135,6 +150,9 @@ function setup_dsl_test() {
     # Wait for VM to be ready
     wait_for_dsl_vm "$VM_NAME"
 
+    # Disable multipathd to avoid LXD disks being grouped as multipath members.
+    disable_multipath_in_vm
+
     # Give the system a moment to detect the new block devices
     sleep 5
 }
@@ -178,6 +196,7 @@ function install_microceph_in_vm() {
         vm_exec snap connect microceph:hardware-observe || true
         vm_exec snap connect microceph:mount-observe || true
         vm_exec snap connect microceph:dm-crypt || true
+	vm_exec snap connect microceph:microceph-support || true
     else
         if [ -n "$SNAP_PATH" ]; then
             echo "Warning: No snap file found matching '$SNAP_PATH', falling back to snap store"
@@ -416,7 +435,7 @@ function test_dsl_wal_db_empty_match_nonfatal() {
 function test_dsl_wal_db_add_disk() {
     set -eux
 
-    echo "Test: WAL/DB add disk using DSL (dry-run)..."
+    echo "Test: WAL/DB add disk using DSL..."
 
     disk_list_json=$(vm_exec microceph disk list --json 2>/dev/null)
     data_disk=$(echo "$disk_list_json" | jq -r '.AvailableDisks[] | select(.Size=="4.00GiB") | .Path' | head -n1)
@@ -443,23 +462,41 @@ function test_dsl_wal_db_add_disk() {
         exit 1
     fi
 
+    configured_before=$(vm_exec microceph disk list --json 2>/dev/null | jq '.ConfiguredDisks | length')
+    echo "Configured disks before add: $configured_before"
+
     wal_db_add_output=$(vm_exec microceph disk add \
         --osd-match "and(eq(@devnode, '$data_devnode'), ge(@size, 4GiB), lt(@size, 5GiB))" \
         --wal-match "and(eq(@devnode, '$wal_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
         --wal-size 1GiB \
         --db-match "and(eq(@devnode, '$db_devnode'), ge(@size, 2GiB), lt(@size, 3GiB))" \
         --db-size 1GiB \
-        --dry-run 2>&1) || true
+        --wipe 2>&1) || true
 
-    echo "WAL/DB add dry-run output:"
+    echo "WAL/DB add output:"
     echo "$wal_db_add_output"
 
-    if echo "$wal_db_add_output" | grep -qiE "Matched WAL backing devices|Planned partition creation|Planned OSD assignments"; then
-        echo "PASS: WAL/DB add dry-run output detected"
-    else
-        echo "FAIL: WAL/DB add dry-run output missing expected content"
+    if echo "$wal_db_add_output" | grep -qi "Validation Error found"; then
+        echo "FAIL: WAL/DB add returned validation error"
         exit 1
     fi
+
+    if echo "$wal_db_add_output" | grep -qi "Failure"; then
+        echo "FAIL: WAL/DB add reported failure"
+        exit 1
+    fi
+
+    sleep 5
+
+    configured_after=$(vm_exec microceph disk list --json 2>/dev/null | jq '.ConfiguredDisks | length')
+    echo "Configured disks after add: $configured_after"
+
+    if [ "$configured_after" -le "$configured_before" ]; then
+        echo "FAIL: WAL/DB add did not increase configured disk count"
+        exit 1
+    fi
+
+    echo "PASS: WAL/DB add succeeded"
 }
 
 # Test: Add disk using DSL
@@ -623,7 +660,9 @@ function run_dsl_tests() {
 # Main test execution (standalone mode)
 function run_dsl_functest() {
     set -e
-    trap cleanup_dsl_test EXIT
+    if [ "$NO_CLEANUP" -eq 0 ]; then
+        trap cleanup_dsl_test EXIT
+    fi
 
     setup_dsl_test
     install_microceph_in_vm
@@ -655,7 +694,7 @@ function parse_dsl_args() {
                 shift 2
                 ;;
             --no-cleanup)
-                trap - EXIT
+                NO_CLEANUP=1
                 shift
                 ;;
             --help)

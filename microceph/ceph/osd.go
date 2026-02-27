@@ -1925,7 +1925,17 @@ func (m *OSDManager) timeoutWipe(path string) error {
 		"--yes-i-really-really-mean-it",
 	)
 	logger.Infof("Wipe command finished, err: %v", err)
-	return err
+	if err != nil {
+		return err
+	}
+
+	_, err = m.runner.RunCommandContext(ctx, "sgdisk", "--zap-all", path)
+	logger.Infof("Partition table zap finished, err: %v", err)
+	if err != nil {
+		return fmt.Errorf("failed to zap partition table on %s: %w", path, err)
+	}
+
+	return nil
 }
 
 func doRemoveOSD(ctx context.Context, s interfaces.StateInterface, osd int64, bypassSafety bool) error {
