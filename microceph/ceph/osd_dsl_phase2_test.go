@@ -84,6 +84,38 @@ func TestPlanRolePartitionsWipeIgnoresExistingPartitions(t *testing.T) {
 	assert.Equal(t, uint64(1), plan[0].PartNum)
 }
 
+func TestBackingDiskWipeEnabledIgnoresGlobalWipe(t *testing.T) {
+	assert.False(t, backingDiskWipeEnabled(false))
+	assert.False(t, backingDiskWipeEnabled(true))
+}
+
+func TestPlanRolePartitionsForBackingDisksIgnoresGlobalWipe(t *testing.T) {
+	disks := []api.ResourcesStorageDisk{
+		{
+			ID:       "sdb",
+			DeviceID: "disk-a",
+			Size:     100 * 1024 * 1024 * 1024,
+			Partitions: []api.ResourcesStorageDiskPartition{
+				{Partition: 1, Size: 40 * 1024 * 1024 * 1024},
+				{Partition: 2, Size: 20 * 1024 * 1024 * 1024},
+			},
+		},
+	}
+
+	// Demonstrate the unsafe behavior: wipe=true would reset numbering and plan partition 1.
+	unsafePlan, err := planRolePartitions("wal", disks, 10*1024*1024*1024, 1, true)
+	assert.NoError(t, err)
+	assert.Len(t, unsafePlan, 1)
+	assert.Equal(t, uint64(1), unsafePlan[0].PartNum)
+
+	// Regression guard: in DSL match mode, global --wipe must not be propagated to backing disks.
+	backingWipe := backingDiskWipeEnabled(true)
+	plan, err := planRolePartitions("wal", disks, 10*1024*1024*1024, 1, backingWipe)
+	assert.NoError(t, err)
+	assert.Len(t, plan, 1)
+	assert.Equal(t, uint64(3), plan[0].PartNum)
+}
+
 func TestHasMountedPartitions(t *testing.T) {
 	disk := api.ResourcesStorageDisk{
 		Partitions: []api.ResourcesStorageDiskPartition{{Partition: 1, Mounted: false}},

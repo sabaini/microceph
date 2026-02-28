@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/canonical/microceph/microceph/interfaces"
@@ -124,48 +123,7 @@ func handleDSLDiskAdd(r *http.Request, s state.State, req types.DisksPost) respo
 }
 
 func validateDiskPostMatchFields(req types.DisksPost) error {
-	isMatchMode := req.OSDMatch != "" || req.WALMatch != "" || req.DBMatch != "" || req.WALSize != "" || req.DBSize != ""
-
-	if isMatchMode && req.OSDMatch == "" {
-		return fmt.Errorf("--osd-match is required when using --wal-match/--db-match/--wal-size/--db-size")
-	}
-
-	hasPositionalPaths := false
-	for _, path := range req.Path {
-		if strings.TrimSpace(path) != "" {
-			hasPositionalPaths = true
-			break
-		}
-	}
-	if isMatchMode && hasPositionalPaths {
-		return fmt.Errorf("--osd-match/--wal-match/--db-match cannot be used with positional device arguments")
-	}
-
-	if req.DryRun && req.OSDMatch == "" {
-		return fmt.Errorf("--dry-run requires --osd-match")
-	}
-
-	if req.WALMatch != "" && req.WALSize == "" {
-		return fmt.Errorf("--wal-size is required when --wal-match is set")
-	}
-
-	if req.DBMatch != "" && req.DBSize == "" {
-		return fmt.Errorf("--db-size is required when --db-match is set")
-	}
-
-	if req.WALSize != "" && req.WALMatch == "" {
-		return fmt.Errorf("--wal-size requires --wal-match")
-	}
-
-	if req.DBSize != "" && req.DBMatch == "" {
-		return fmt.Errorf("--db-size requires --db-match")
-	}
-
-	if isMatchMode && ((req.WALDev != nil && strings.TrimSpace(*req.WALDev) != "") || (req.DBDev != nil && strings.TrimSpace(*req.DBDev) != "")) {
-		return fmt.Errorf("--wal-device and --db-device cannot be used with --osd-match/--wal-match/--db-match")
-	}
-
-	return nil
+	return types.ValidateDisksPostMatchFields(req)
 }
 
 // cmdDisksDelete is the handler for DELETE /1.0/disks/{osdid}.

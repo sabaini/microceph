@@ -806,6 +806,34 @@ func (s *osdSuite) TestTimeoutWipe() {
 	assert.Error(s.T(), err)
 }
 
+// TestTimeoutWipeUsesSeparateContexts verifies each wipe step gets its own timeout context.
+func (s *osdSuite) TestTimeoutWipeUsesSeparateContexts() {
+	osdmgr := NewOSDManager(nil)
+	r := mocks.NewRunner(s.T())
+	osdmgr.runner = r
+
+	var zapCtx context.Context
+	var zapTableCtx context.Context
+
+	r.On("RunCommandContext", mock.Anything, "ceph-bluestore-tool", "zap-device", "--dev", "/dev/sda", "--yes-i-really-really-mean-it").
+		Run(func(args mock.Arguments) {
+			zapCtx = args.Get(0).(context.Context)
+		}).
+		Return("", nil).Once()
+
+	r.On("RunCommandContext", mock.Anything, "sgdisk", "--zap-all", "/dev/sda").
+		Run(func(args mock.Arguments) {
+			zapTableCtx = args.Get(0).(context.Context)
+		}).
+		Return("", nil).Once()
+
+	err := osdmgr.timeoutWipe("/dev/sda")
+	assert.NoError(s.T(), err)
+	assert.NotNil(s.T(), zapCtx)
+	assert.NotNil(s.T(), zapTableCtx)
+	assert.NotEqual(s.T(), fmt.Sprintf("%p", zapCtx), fmt.Sprintf("%p", zapTableCtx))
+}
+
 // TestWipeDevice tests device wiping with retry logic
 func (s *osdSuite) TestWipeDevice() {
 	osdmgr := NewOSDManager(nil)

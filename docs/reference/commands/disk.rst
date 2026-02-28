@@ -143,6 +143,8 @@ Limitations:
 - ``--osd-match`` cannot be used together with positional device arguments.
 - Match mode flags (``--osd-match``, ``--wal-match``, ``--db-match``) cannot be mixed with ``--all-available``.
 - ``--wal-device``/``--db-device`` cannot be combined with match mode flags.
+- ``--wal-wipe``/``--wal-encrypt``/``--db-wipe``/``--db-encrypt`` cannot be combined with match mode flags.
+- ``--wipe`` in match mode applies to OSD data devices only; WAL/DB backing disks matched via ``--wal-match``/``--db-match`` are not wiped.
 
 
 ``list``

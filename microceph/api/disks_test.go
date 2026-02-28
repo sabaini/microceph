@@ -23,3 +23,17 @@ func TestCmdDisksPostRejectsMatchFieldsWithoutOSDMatch(t *testing.T) {
 	assert.NotEmpty(t, validationError)
 	assert.Contains(t, validationError, "osd-match")
 }
+
+func TestCmdDisksPostRejectsRoleSpecificWalDbFlagsInMatchMode(t *testing.T) {
+	reqBody := `{"path":[],"osd_match":"eq(@type, 'ssd')","dry_run":true,"walwipe":true}`
+	req := httptest.NewRequest(http.MethodPost, "/1.0/disks", strings.NewReader(reqBody))
+
+	resp := cmdDisksPost(nil, req)
+	rr := httptest.NewRecorder()
+	err := resp.Render(rr, req)
+	assert.NoError(t, err)
+
+	validationError := gjson.Get(rr.Body.String(), "metadata.validation_error").String()
+	assert.NotEmpty(t, validationError)
+	assert.Contains(t, validationError, "--wal-wipe")
+}

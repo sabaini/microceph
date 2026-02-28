@@ -53,12 +53,36 @@ func TestDiskAddValidateFlags(t *testing.T) {
 			expectError: "cannot be used with positional",
 		},
 		{
+			name: "match mode cannot combine with all-available",
+			cmd: cmdDiskAdd{
+				flagOSDMatch:   "eq(@type, 'ssd')",
+				flagAllDevices: true,
+			},
+			expectError: "cannot be used with --all-available",
+		},
+		{
 			name: "match mode cannot combine with wal-device",
 			cmd: cmdDiskAdd{
 				flagOSDMatch: "eq(@type, 'ssd')",
 				walDevice:    "/dev/nvme0n1",
 			},
 			expectError: "--wal-device and --db-device cannot be used",
+		},
+		{
+			name: "match mode cannot combine with wal-wipe",
+			cmd: cmdDiskAdd{
+				flagOSDMatch: "eq(@type, 'ssd')",
+				walWipe:      true,
+			},
+			expectError: "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used",
+		},
+		{
+			name: "match mode cannot combine with db-encrypt",
+			cmd: cmdDiskAdd{
+				flagOSDMatch: "eq(@type, 'ssd')",
+				dbEncrypt:    true,
+			},
+			expectError: "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used",
 		},
 		{
 			name: "valid osd wal db match mode",

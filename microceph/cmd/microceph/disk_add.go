@@ -61,6 +61,11 @@ Optionally, add --wal-match/--db-match and matching partition sizes to automatic
 create WAL/DB partitions and assign one partition per newly created OSD:
   microceph disk add --osd-match "eq(@type, 'ssd')" --wal-match "eq(@type, 'nvme')" --wal-size 4GiB
 
+Note: in match mode, --wipe applies to OSD data devices only. Matched WAL/DB backing disks
+are never wiped implicitly.
+Role-specific --wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt are only valid when using
+explicit --wal-device/--db-device.
+
 Available DSL predicates: and(), or(), not(), in(), re(), eq(), ne(), gt(), ge(), lt(), le()
 Available variables: @type, @vendor, @model, @size, @devnode, @host`,
 		RunE: c.Run,
@@ -169,52 +174,41 @@ func (c *cmdDiskAdd) Run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func (c *cmdDiskAdd) validationRequest(args []string) types.DisksPost {
+	req := types.DisksPost{
+		Path:       args,
+		OSDMatch:   c.flagOSDMatch,
+		WALMatch:   c.flagWALMatch,
+		DBMatch:    c.flagDBMatch,
+		WALSize:    c.flagWALSize,
+		DBSize:     c.flagDBSize,
+		DryRun:     c.flagDryRun,
+		WALWipe:    c.walWipe,
+		WALEncrypt: c.walEncrypt,
+		DBWipe:     c.dbWipe,
+		DBEncrypt:  c.dbEncrypt,
+	}
+
+	if c.walDevice != "" {
+		req.WALDev = &c.walDevice
+	}
+
+	if c.dbDevice != "" {
+		req.DBDev = &c.dbDevice
+	}
+
+	return req
+}
+
 // validateFlags checks for invalid flag combinations.
 func (c *cmdDiskAdd) validateFlags(args []string) error {
-	isMatchMode := c.flagOSDMatch != "" || c.flagWALMatch != "" || c.flagDBMatch != "" || c.flagWALSize != "" || c.flagDBSize != ""
-
-	// --osd-match is mandatory for match mode.
-	if isMatchMode && c.flagOSDMatch == "" {
-		return fmt.Errorf("--osd-match is required when using --wal-match/--db-match/--wal-size/--db-size")
+	req := c.validationRequest(args)
+	if err := types.ValidateDisksPostMatchFields(req); err != nil {
+		return err
 	}
 
-	// Match mode is mutually exclusive with positional args.
-	if isMatchMode && len(args) > 0 {
-		return fmt.Errorf("--osd-match/--wal-match/--db-match cannot be used with positional device arguments")
-	}
-
-	// Match mode is mutually exclusive with --all-available.
-	if isMatchMode && c.flagAllDevices {
+	if types.IsDisksPostMatchMode(req) && c.flagAllDevices {
 		return fmt.Errorf("--osd-match/--wal-match/--db-match cannot be used with --all-available")
-	}
-
-	// --dry-run requires --osd-match.
-	if c.flagDryRun && c.flagOSDMatch == "" {
-		return fmt.Errorf("--dry-run requires --osd-match")
-	}
-
-	// --wal-match requires --wal-size.
-	if c.flagWALMatch != "" && c.flagWALSize == "" {
-		return fmt.Errorf("--wal-size is required when --wal-match is set")
-	}
-
-	// --db-match requires --db-size.
-	if c.flagDBMatch != "" && c.flagDBSize == "" {
-		return fmt.Errorf("--db-size is required when --db-match is set")
-	}
-
-	// Standalone wal/db size values are not accepted.
-	if c.flagWALSize != "" && c.flagWALMatch == "" {
-		return fmt.Errorf("--wal-size requires --wal-match")
-	}
-
-	if c.flagDBSize != "" && c.flagDBMatch == "" {
-		return fmt.Errorf("--db-size requires --db-match")
-	}
-
-	// Positional WAL/DB device flags are not supported in match mode.
-	if isMatchMode && (c.walDevice != "" || c.dbDevice != "") {
-		return fmt.Errorf("--wal-device and --db-device cannot be used with --osd-match/--wal-match/--db-match")
 	}
 
 	return nil
