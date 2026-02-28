@@ -33,18 +33,28 @@ DISK3_NAME="${VM_NAME}-disk3"
 DISK3_SIZE="${DISK3_SIZE:-2GiB}"
 DISK4_NAME="${VM_NAME}-disk4"
 DISK4_SIZE="${DISK4_SIZE:-4GiB}"
+DISK5_NAME="${VM_NAME}-disk5"
+DISK5_SIZE="${DISK5_SIZE:-4GiB}"
+DISK6_NAME="${VM_NAME}-disk6"
+DISK6_SIZE="${DISK6_SIZE:-4GiB}"
 
 CONTROL_SOCKET="/var/snap/microceph/common/state/control.socket"
 ONE_GIB_BYTES=1073741824
 SIZE_TOLERANCE_BYTES=2097152 # 2 MiB
+SENTINEL_PART_SIZE_SGDISK="64M"
+SMALL_WALDB_PART_SIZE="128MiB"
 
 # Selected test disks (resolved during setup)
 OSD_DISK_PRIMARY=""
 OSD_DISK_SECONDARY=""
+OSD_DISK_TERTIARY=""
+OSD_DISK_QUATERNARY=""
 WAL_DISK=""
 DB_DISK=""
 OSD_DEV_PRIMARY=""
 OSD_DEV_SECONDARY=""
+OSD_DEV_TERTIARY=""
+OSD_DEV_QUATERNARY=""
 WAL_DEVNODE=""
 DB_DEVNODE=""
 
@@ -93,6 +103,15 @@ function assert_eq() {
     local expected="$2"
     local message="${3:-Expected '${expected}', got '${got}'}"
     if [[ "$got" != "$expected" ]]; then
+        fail "$message"
+    fi
+}
+
+function assert_ne() {
+    local got="$1"
+    local expected="$2"
+    local message="${3:-Expected '${got}' to differ from '${expected}'}"
+    if [[ "$got" == "$expected" ]]; then
         fail "$message"
     fi
 }
@@ -195,6 +214,12 @@ function first_partition_path() {
     vm_sh "lsblk -nr -o PATH '${devnode}' | tail -n +2 | head -n1"
 }
 
+function partition_path_by_number() {
+    local devnode="$1"
+    local part_num="$2"
+    vm_sh "lsblk -nr -o PATH,PARTN '${devnode}' | awk '\$2 == \"${part_num}\" {print \$1; exit}'"
+}
+
 function block_size_bytes() {
     local path="$1"
     vm_sh "lsblk -bnr -o SIZE '${path}'"
@@ -218,10 +243,9 @@ function cleanup_dsl_test() {
     lxc stop "$VM_NAME" --force 2>/dev/null || true
     lxc delete "$VM_NAME" --force 2>/dev/null || true
 
-    lxc storage volume delete "$STORAGE_POOL" "$DISK1_NAME" 2>/dev/null || true
-    lxc storage volume delete "$STORAGE_POOL" "$DISK2_NAME" 2>/dev/null || true
-    lxc storage volume delete "$STORAGE_POOL" "$DISK3_NAME" 2>/dev/null || true
-    lxc storage volume delete "$STORAGE_POOL" "$DISK4_NAME" 2>/dev/null || true
+    for disk in "$DISK1_NAME" "$DISK2_NAME" "$DISK3_NAME" "$DISK4_NAME" "$DISK5_NAME" "$DISK6_NAME"; do
+        lxc storage volume delete "$STORAGE_POOL" "$disk" 2>/dev/null || true
+    done
 
     if [ "$exit_code" -eq 0 ]; then
         pass "DSL functional test completed successfully"
@@ -286,14 +310,20 @@ function setup_dsl_test() {
 
     echo "=== MicroCeph DSL Functional Test ==="
     echo "VM Name: $VM_NAME"
-    echo "Disks: $DISK1_NAME ($DISK1_SIZE), $DISK2_NAME ($DISK2_SIZE), $DISK3_NAME ($DISK3_SIZE), $DISK4_NAME ($DISK4_SIZE)"
+    echo "Disks:"
+    echo "  - $DISK1_NAME ($DISK1_SIZE)"
+    echo "  - $DISK2_NAME ($DISK2_SIZE)"
+    echo "  - $DISK3_NAME ($DISK3_SIZE)"
+    echo "  - $DISK4_NAME ($DISK4_SIZE)"
+    echo "  - $DISK5_NAME ($DISK5_SIZE)"
+    echo "  - $DISK6_NAME ($DISK6_SIZE)"
 
     if lxc info "$VM_NAME" &>/dev/null; then
         lxc stop "$VM_NAME" --force 2>/dev/null || true
         lxc delete "$VM_NAME" --force 2>/dev/null || true
     fi
 
-    for disk in "$DISK1_NAME" "$DISK2_NAME" "$DISK3_NAME" "$DISK4_NAME"; do
+    for disk in "$DISK1_NAME" "$DISK2_NAME" "$DISK3_NAME" "$DISK4_NAME" "$DISK5_NAME" "$DISK6_NAME"; do
         if lxc storage volume show "$STORAGE_POOL" "$disk" &>/dev/null; then
             lxc storage volume delete "$STORAGE_POOL" "$disk" 2>/dev/null || true
         fi
@@ -303,6 +333,8 @@ function setup_dsl_test() {
     lxc storage volume create "$STORAGE_POOL" "$DISK2_NAME" --type block size="$DISK2_SIZE"
     lxc storage volume create "$STORAGE_POOL" "$DISK3_NAME" --type block size="$DISK3_SIZE"
     lxc storage volume create "$STORAGE_POOL" "$DISK4_NAME" --type block size="$DISK4_SIZE"
+    lxc storage volume create "$STORAGE_POOL" "$DISK5_NAME" --type block size="$DISK5_SIZE"
+    lxc storage volume create "$STORAGE_POOL" "$DISK6_NAME" --type block size="$DISK6_SIZE"
 
     lxc launch ubuntu:24.04 "$VM_NAME" \
         -p "$PROFILE" \
@@ -314,6 +346,8 @@ function setup_dsl_test() {
     lxc storage volume attach "$STORAGE_POOL" "$DISK2_NAME" "$VM_NAME"
     lxc storage volume attach "$STORAGE_POOL" "$DISK3_NAME" "$VM_NAME"
     lxc storage volume attach "$STORAGE_POOL" "$DISK4_NAME" "$VM_NAME"
+    lxc storage volume attach "$STORAGE_POOL" "$DISK5_NAME" "$VM_NAME"
+    lxc storage volume attach "$STORAGE_POOL" "$DISK6_NAME" "$VM_NAME"
 
     wait_for_dsl_vm "$VM_NAME"
     disable_multipath_in_vm
@@ -337,9 +371,10 @@ function resolve_snap_path() {
 }
 
 function install_vm_test_tools() {
-    info "Installing VM test dependencies (jq, curl)"
+    info "Installing VM test dependencies (jq, curl, gdisk)"
     vm_sh "DEBIAN_FRONTEND=noninteractive apt-get update -qq"
-    vm_sh "DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl >/dev/null"
+    vm_sh "DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl gdisk >/dev/null"
+    vm_sh "command -v sgdisk >/dev/null"
 }
 
 # Install MicroCeph snap in VM
@@ -388,13 +423,13 @@ function select_test_disks() {
 
     local available_count
     available_count=$(jq -r '.AvailableDisks | length' <<<"$disk_list_json")
-    assert_ge "$available_count" 4 "Expected at least 4 available disks before tests"
+    assert_ge "$available_count" 6 "Expected at least 6 available disks before tests"
 
     mapfile -t four_gib_disks < <(jq -r '.AvailableDisks[] | select(.Size == "4.00GiB") | .Path' <<<"$disk_list_json" | sort)
     mapfile -t two_gib_disks < <(jq -r '.AvailableDisks[] | select(.Size == "2.00GiB") | .Path' <<<"$disk_list_json" | sort)
 
-    if (( ${#four_gib_disks[@]} < 2 )); then
-        fail "Need at least two 4.00GiB disks for OSD tests (found ${#four_gib_disks[@]})"
+    if (( ${#four_gib_disks[@]} < 4 )); then
+        fail "Need at least four 4.00GiB disks for OSD tests (found ${#four_gib_disks[@]})"
     fi
 
     if (( ${#two_gib_disks[@]} < 2 )); then
@@ -403,23 +438,33 @@ function select_test_disks() {
 
     OSD_DISK_PRIMARY="${four_gib_disks[0]}"
     OSD_DISK_SECONDARY="${four_gib_disks[1]}"
+    OSD_DISK_TERTIARY="${four_gib_disks[2]}"
+    OSD_DISK_QUATERNARY="${four_gib_disks[3]}"
     WAL_DISK="${two_gib_disks[0]}"
     DB_DISK="${two_gib_disks[1]}"
 
     OSD_DEV_PRIMARY=$(vm_exec readlink -f "$OSD_DISK_PRIMARY")
     OSD_DEV_SECONDARY=$(vm_exec readlink -f "$OSD_DISK_SECONDARY")
+    OSD_DEV_TERTIARY=$(vm_exec readlink -f "$OSD_DISK_TERTIARY")
+    OSD_DEV_QUATERNARY=$(vm_exec readlink -f "$OSD_DISK_QUATERNARY")
     WAL_DEVNODE=$(vm_exec readlink -f "$WAL_DISK")
     DB_DEVNODE=$(vm_exec readlink -f "$DB_DISK")
 
-    if [[ "$OSD_DEV_PRIMARY" == "$OSD_DEV_SECONDARY" || "$OSD_DEV_PRIMARY" == "$WAL_DEVNODE" || "$OSD_DEV_PRIMARY" == "$DB_DEVNODE" || "$OSD_DEV_SECONDARY" == "$WAL_DEVNODE" || "$OSD_DEV_SECONDARY" == "$DB_DEVNODE" || "$WAL_DEVNODE" == "$DB_DEVNODE" ]]; then
+    local all_nodes
+    all_nodes=$(printf "%s\n" "$OSD_DEV_PRIMARY" "$OSD_DEV_SECONDARY" "$OSD_DEV_TERTIARY" "$OSD_DEV_QUATERNARY" "$WAL_DEVNODE" "$DB_DEVNODE")
+    local unique_nodes
+    unique_nodes=$(sort -u <<<"$all_nodes" | wc -l)
+    if [[ "$unique_nodes" != "6" ]]; then
         fail "Resolved test devices are not distinct"
     fi
 
     info "Selected test disks:"
-    info "  OSD primary   : ${OSD_DISK_PRIMARY} (${OSD_DEV_PRIMARY})"
-    info "  OSD secondary : ${OSD_DISK_SECONDARY} (${OSD_DEV_SECONDARY})"
-    info "  WAL backing   : ${WAL_DISK} (${WAL_DEVNODE})"
-    info "  DB backing    : ${DB_DISK} (${DB_DEVNODE})"
+    info "  OSD primary    : ${OSD_DISK_PRIMARY} (${OSD_DEV_PRIMARY})"
+    info "  OSD secondary  : ${OSD_DISK_SECONDARY} (${OSD_DEV_SECONDARY})"
+    info "  OSD tertiary   : ${OSD_DISK_TERTIARY} (${OSD_DEV_TERTIARY})"
+    info "  OSD quaternary : ${OSD_DISK_QUATERNARY} (${OSD_DEV_QUATERNARY})"
+    info "  WAL backing    : ${WAL_DISK} (${WAL_DEVNODE})"
+    info "  DB backing     : ${DB_DISK} (${DB_DEVNODE})"
 }
 
 # Test: List available disks and assert we can parse expected structure.
@@ -435,7 +480,7 @@ function test_dsl_disk_list() {
     available_count=$(jq -r '.AvailableDisks | length' <<<"$disk_list_json")
 
     assert_eq "$configured_count" "0" "Expected 0 configured disks before DSL add tests"
-    assert_ge "$available_count" 4 "Expected at least 4 available disks"
+    assert_ge "$available_count" 6 "Expected at least 6 available disks"
 
     pass "Disk inventory is sane (configured=${configured_count}, available=${available_count})"
 }
@@ -527,6 +572,118 @@ function test_dsl_cli_flag_validation() {
     assert_contains "$out" "--db-size is required"
 
     pass "CLI flag validation checks passed"
+}
+
+function test_dsl_match_mode_role_specific_flags_rejected() {
+    set -eux
+
+    local out
+    local payload
+    local resp
+    local validation_error
+
+    if run_vm_capture out "microceph disk add --osd-match \"eq(@type, 'scsi')\" --wal-wipe --dry-run"; then
+        fail "Expected --wal-wipe in match mode to fail"
+    fi
+    assert_contains "$out" "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used"
+
+    if run_vm_capture out "microceph disk add --osd-match \"eq(@type, 'scsi')\" --db-encrypt --dry-run"; then
+        fail "Expected --db-encrypt in match mode to fail"
+    fi
+    assert_contains "$out" "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used"
+
+    payload='{"path":[],"osd_match":"eq(@type, '\''scsi'\'')","dry_run":true,"walwipe":true}'
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_contains "$validation_error" "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt"
+
+    pass "Role-specific WAL/DB flags are rejected in match mode (CLI + API)"
+}
+
+# Validation boundaries: malformed/invalid/tiny/fractional WAL/DB sizes in CLI and API.
+function test_dsl_size_validation_boundaries() {
+    set -eux
+
+    local payload
+    local resp
+    local validation_error
+    local wal_part_count
+    local wal_part_size
+    local out
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_PRIMARY}')","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"4XYZ","dry_run":true}
+EOF
+)
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_contains "$validation_error" "invalid wal size" "Expected invalid WAL unit to be rejected"
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_PRIMARY}')","db_match":"eq(@devnode, '${DB_DEVNODE}')","db_size":"not-a-size","dry_run":true}
+EOF
+)
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_contains "$validation_error" "invalid db size" "Expected malformed DB size to be rejected"
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_PRIMARY}')","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"0GiB","dry_run":true}
+EOF
+)
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_contains "$validation_error" "must be greater than zero" "Expected zero WAL size to be rejected"
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_PRIMARY}')","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"0.5GiB","dry_run":true}
+EOF
+)
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_eq "$validation_error" "" "Expected fractional WAL size to be accepted"
+    wal_part_count=$(jq -r '[.metadata.dry_run_partitions[] | select(.role == "wal")] | length' <<<"$resp")
+    assert_eq "$wal_part_count" "1"
+    wal_part_size=$(jq -r '.metadata.dry_run_partitions[] | select(.role == "wal") | .part_size' <<<"$resp")
+    assert_regex "$wal_part_size" '^512\.00 ?MiB$' "Expected 0.5GiB to plan as 512.00 MiB"
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_PRIMARY}')","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"1MiB","dry_run":true}
+EOF
+)
+    resp=$(vm_post_disks "$payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$resp")
+    assert_eq "$validation_error" "" "Expected tiny WAL size to be accepted"
+    wal_part_count=$(jq -r '[.metadata.dry_run_partitions[] | select(.role == "wal")] | length' <<<"$resp")
+    assert_eq "$wal_part_count" "1"
+    wal_part_size=$(jq -r '.metadata.dry_run_partitions[] | select(.role == "wal") | .part_size' <<<"$resp")
+    assert_regex "$wal_part_size" '^1\.00 ?MiB$' "Expected 1MiB partition plan string"
+
+    if run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_PRIMARY}')\" --wal-match \"eq(@devnode, '${WAL_DEVNODE}')\" --wal-size 4XYZ --dry-run"; then
+        fail "Expected CLI invalid WAL unit to fail"
+    fi
+    assert_contains "$out" "invalid wal size"
+
+    if run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_PRIMARY}')\" --db-match \"eq(@devnode, '${DB_DEVNODE}')\" --db-size not-a-size --dry-run"; then
+        fail "Expected CLI malformed DB size to fail"
+    fi
+    assert_contains "$out" "invalid db size"
+
+    if ! run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_PRIMARY}')\" --wal-match \"eq(@devnode, '${WAL_DEVNODE}')\" --wal-size 0.5GiB --dry-run"; then
+        echo "$out"
+        fail "Expected CLI fractional WAL size dry-run to succeed"
+    fi
+    assert_contains "$out" "Planned partition creation"
+    assert_regex "$out" '512\.00[[:space:]]*MiB' "Expected CLI output to include fractional WAL partition size"
+
+    if ! run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_PRIMARY}')\" --wal-match \"eq(@devnode, '${WAL_DEVNODE}')\" --wal-size 1MiB --dry-run"; then
+        echo "$out"
+        fail "Expected CLI tiny WAL size dry-run to succeed"
+    fi
+    assert_contains "$out" "Planned partition creation"
+    assert_regex "$out" '1\.00[[:space:]]*MiB' "Expected CLI output to include tiny WAL partition size"
+
+    pass "Size validation boundaries are covered for CLI and API"
 }
 
 # Safety: overlap between OSD and WAL/DB backing devices must be rejected.
@@ -689,6 +846,39 @@ EOF
     pass "Dry-run WAL/DB plan consistency validated"
 }
 
+# Determinism: repeated dry-run calls with identical payload should return identical planning output.
+function test_dsl_dry_run_deterministic_output() {
+    set -eux
+
+    local payload
+    local resp1
+    local resp2
+    local validation_error_1
+    local validation_error_2
+    local snapshot_1
+    local snapshot_2
+
+    payload=$(cat <<EOF
+{"path":[],"osd_match":"or(eq(@devnode, '${OSD_DEV_PRIMARY}'), eq(@devnode, '${OSD_DEV_SECONDARY}'))","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"${SMALL_WALDB_PART_SIZE}","db_match":"eq(@devnode, '${DB_DEVNODE}')","db_size":"${SMALL_WALDB_PART_SIZE}","wipe":true,"dry_run":true}
+EOF
+)
+
+    resp1=$(vm_post_disks "$payload")
+    resp2=$(vm_post_disks "$payload")
+
+    validation_error_1=$(jq -r '.metadata.validation_error // ""' <<<"$resp1")
+    validation_error_2=$(jq -r '.metadata.validation_error // ""' <<<"$resp2")
+    assert_eq "$validation_error_1" "" "Expected first dry-run call to succeed"
+    assert_eq "$validation_error_2" "" "Expected second dry-run call to succeed"
+
+    snapshot_1=$(jq -Sc '{dry_run_devices: .metadata.dry_run_devices, dry_run_wal_devices: .metadata.dry_run_wal_devices, dry_run_db_devices: .metadata.dry_run_db_devices, dry_run_partitions: .metadata.dry_run_partitions, dry_run_assignments: .metadata.dry_run_assignments}' <<<"$resp1")
+    snapshot_2=$(jq -Sc '{dry_run_devices: .metadata.dry_run_devices, dry_run_wal_devices: .metadata.dry_run_wal_devices, dry_run_db_devices: .metadata.dry_run_db_devices, dry_run_partitions: .metadata.dry_run_partitions, dry_run_assignments: .metadata.dry_run_assignments}' <<<"$resp2")
+
+    assert_eq "$snapshot_1" "$snapshot_2" "Dry-run planning output changed between identical requests"
+
+    pass "Dry-run planning output is deterministic for identical requests"
+}
+
 # Safety + behavior: execute WAL/DB add and verify resulting partition + assignment state.
 function test_dsl_wal_db_apply_and_verify_partitions() {
     set -eux
@@ -840,6 +1030,180 @@ EOF
     pass "--wipe dry-run allows dirty disk"
 }
 
+# Regression: in match mode, --wipe applies to data OSDs only and must not wipe existing WAL/DB backing partitions.
+function test_dsl_match_mode_wipe_preserves_existing_backing_partitions() {
+    set -eux
+
+    local configured_before
+    local configured_after
+    local wal_parts_before
+    local wal_parts_after
+    local db_parts_before
+    local db_parts_after
+    local wal_sentinel_num
+    local db_sentinel_num
+    local wal_sentinel_path
+    local db_sentinel_path
+    local out
+
+    configured_before=$(get_configured_count)
+    wal_parts_before=$(partition_count "$WAL_DEVNODE")
+    db_parts_before=$(partition_count "$DB_DEVNODE")
+
+    wal_sentinel_num=$((wal_parts_before + 1))
+    db_sentinel_num=$((db_parts_before + 1))
+
+    vm_sh "sgdisk --new=${wal_sentinel_num}:0:+${SENTINEL_PART_SIZE_SGDISK} --typecode=${wal_sentinel_num}:8300 '${WAL_DEVNODE}'"
+    vm_sh "sgdisk --new=${db_sentinel_num}:0:+${SENTINEL_PART_SIZE_SGDISK} --typecode=${db_sentinel_num}:8300 '${DB_DEVNODE}'"
+    vm_sh "udevadm settle || true"
+
+    wal_sentinel_path=$(partition_path_by_number "$WAL_DEVNODE" "$wal_sentinel_num")
+    db_sentinel_path=$(partition_path_by_number "$DB_DEVNODE" "$db_sentinel_num")
+
+    if [[ -z "$wal_sentinel_path" || -z "$db_sentinel_path" ]]; then
+        fail "Failed to resolve sentinel WAL/DB partition paths"
+    fi
+
+    vm_sh "test -b '${wal_sentinel_path}'"
+    vm_sh "test -b '${db_sentinel_path}'"
+
+    if ! run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_TERTIARY}')\" --wal-match \"eq(@devnode, '${WAL_DEVNODE}')\" --wal-size ${SMALL_WALDB_PART_SIZE} --db-match \"eq(@devnode, '${DB_DEVNODE}')\" --db-size ${SMALL_WALDB_PART_SIZE} --wipe"; then
+        echo "$out"
+        fail "Expected match-mode add with --wipe to succeed for data device"
+    fi
+
+    assert_not_contains "$out" "Failure"
+    assert_not_contains "$out" "Validation Error"
+
+    wait_for_configured_count $((configured_before + 1)) 180
+    configured_after=$(get_configured_count)
+    assert_eq "$configured_after" "$((configured_before + 1))" "Expected exactly one new configured disk in wipe-preservation test"
+
+    wal_parts_after=$(partition_count "$WAL_DEVNODE")
+    db_parts_after=$(partition_count "$DB_DEVNODE")
+
+    assert_eq "$wal_parts_after" "$((wal_parts_before + 2))" "WAL backing partitions were unexpectedly reset/wiped"
+    assert_eq "$db_parts_after" "$((db_parts_before + 2))" "DB backing partitions were unexpectedly reset/wiped"
+
+    vm_sh "test -b '${wal_sentinel_path}'"
+    vm_sh "test -b '${db_sentinel_path}'"
+
+    pass "Match-mode --wipe preserves existing WAL/DB backing partitions"
+}
+
+# Multi-OSD black-box test: ensure dry-run assignments are unique and actual symlinks match planned assignments.
+function test_dsl_wal_db_multi_osd_assignment_correctness() {
+    set -eux
+
+    local dry_payload
+    local dry_resp
+    local apply_payload
+    local apply_resp
+    local validation_error
+    local osd_count
+    local assignment_count
+    local wal_part_count
+    local db_part_count
+    local unique_wal_assignments
+    local unique_db_assignments
+    local planned_wal_secondary
+    local planned_db_secondary
+    local planned_wal_quaternary
+    local planned_db_quaternary
+    local configured_before
+    local configured_after
+    local failure_count
+    local osd_dir_secondary
+    local osd_dir_quaternary
+    local wal_link_secondary
+    local db_link_secondary
+    local wal_link_quaternary
+    local db_link_quaternary
+    local planned_wal_secondary_real
+    local planned_db_secondary_real
+    local planned_wal_quaternary_real
+    local planned_db_quaternary_real
+
+    dry_payload=$(cat <<EOF
+{"path":[],"osd_match":"or(eq(@devnode, '${OSD_DEV_SECONDARY}'), eq(@devnode, '${OSD_DEV_QUATERNARY}'))","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"${SMALL_WALDB_PART_SIZE}","db_match":"eq(@devnode, '${DB_DEVNODE}')","db_size":"${SMALL_WALDB_PART_SIZE}","wipe":true,"dry_run":true}
+EOF
+)
+
+    dry_resp=$(vm_post_disks "$dry_payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$dry_resp")
+    assert_eq "$validation_error" "" "Expected valid multi-OSD WAL/DB dry-run"
+
+    osd_count=$(jq -r '.metadata.dry_run_devices | length' <<<"$dry_resp")
+    assignment_count=$(jq -r '.metadata.dry_run_assignments | length' <<<"$dry_resp")
+    wal_part_count=$(jq -r '[.metadata.dry_run_partitions[] | select(.role == "wal")] | length' <<<"$dry_resp")
+    db_part_count=$(jq -r '[.metadata.dry_run_partitions[] | select(.role == "db")] | length' <<<"$dry_resp")
+
+    assert_eq "$osd_count" "2" "Expected two OSD data devices in multi-OSD dry-run"
+    assert_eq "$assignment_count" "2" "Expected one assignment per OSD data device"
+    assert_eq "$wal_part_count" "2" "Expected two planned WAL partitions"
+    assert_eq "$db_part_count" "2" "Expected two planned DB partitions"
+
+    unique_wal_assignments=$(jq -r '[.metadata.dry_run_assignments[].wal_device] | unique | length' <<<"$dry_resp")
+    unique_db_assignments=$(jq -r '[.metadata.dry_run_assignments[].db_device] | unique | length' <<<"$dry_resp")
+    assert_eq "$unique_wal_assignments" "2" "Expected unique WAL partition assignments per OSD"
+    assert_eq "$unique_db_assignments" "2" "Expected unique DB partition assignments per OSD"
+
+    planned_wal_secondary=$(jq -r --arg d "$OSD_DISK_SECONDARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .wal_device' <<<"$dry_resp")
+    planned_db_secondary=$(jq -r --arg d "$OSD_DISK_SECONDARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .db_device' <<<"$dry_resp")
+    planned_wal_quaternary=$(jq -r --arg d "$OSD_DISK_QUATERNARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .wal_device' <<<"$dry_resp")
+    planned_db_quaternary=$(jq -r --arg d "$OSD_DISK_QUATERNARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .db_device' <<<"$dry_resp")
+
+    if [[ -z "$planned_wal_secondary" || -z "$planned_db_secondary" || -z "$planned_wal_quaternary" || -z "$planned_db_quaternary" ]]; then
+        fail "Failed to resolve dry-run WAL/DB assignments for both OSD devices"
+    fi
+
+    configured_before=$(get_configured_count)
+
+    apply_payload=$(cat <<EOF
+{"path":[],"osd_match":"or(eq(@devnode, '${OSD_DEV_SECONDARY}'), eq(@devnode, '${OSD_DEV_QUATERNARY}'))","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"${SMALL_WALDB_PART_SIZE}","db_match":"eq(@devnode, '${DB_DEVNODE}')","db_size":"${SMALL_WALDB_PART_SIZE}","wipe":true,"dry_run":false}
+EOF
+)
+
+    apply_resp=$(vm_post_disks "$apply_payload")
+    validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$apply_resp")
+    assert_eq "$validation_error" "" "Unexpected validation error during multi-OSD add"
+
+    failure_count=$(jq -r '[.metadata.report[]? | select(.report == "Failure")] | length' <<<"$apply_resp")
+    assert_eq "$failure_count" "0" "Expected zero failed reports in multi-OSD add"
+
+    wait_for_configured_count $((configured_before + 2)) 240
+    configured_after=$(get_configured_count)
+    assert_eq "$configured_after" "$((configured_before + 2))" "Expected exactly two new configured disks in multi-OSD add"
+
+    osd_dir_secondary=$(get_osd_dir_for_disk_path "$OSD_DISK_SECONDARY")
+    osd_dir_quaternary=$(get_osd_dir_for_disk_path "$OSD_DISK_QUATERNARY")
+
+    vm_sh "test -L '${osd_dir_secondary}/block.wal'"
+    vm_sh "test -L '${osd_dir_secondary}/block.db'"
+    vm_sh "test -L '${osd_dir_quaternary}/block.wal'"
+    vm_sh "test -L '${osd_dir_quaternary}/block.db'"
+
+    wal_link_secondary=$(vm_exec readlink -f "${osd_dir_secondary}/block.wal")
+    db_link_secondary=$(vm_exec readlink -f "${osd_dir_secondary}/block.db")
+    wal_link_quaternary=$(vm_exec readlink -f "${osd_dir_quaternary}/block.wal")
+    db_link_quaternary=$(vm_exec readlink -f "${osd_dir_quaternary}/block.db")
+
+    planned_wal_secondary_real=$(vm_exec readlink -f "$planned_wal_secondary")
+    planned_db_secondary_real=$(vm_exec readlink -f "$planned_db_secondary")
+    planned_wal_quaternary_real=$(vm_exec readlink -f "$planned_wal_quaternary")
+    planned_db_quaternary_real=$(vm_exec readlink -f "$planned_db_quaternary")
+
+    assert_eq "$wal_link_secondary" "$planned_wal_secondary_real" "Secondary OSD WAL link does not match dry-run assignment"
+    assert_eq "$db_link_secondary" "$planned_db_secondary_real" "Secondary OSD DB link does not match dry-run assignment"
+    assert_eq "$wal_link_quaternary" "$planned_wal_quaternary_real" "Quaternary OSD WAL link does not match dry-run assignment"
+    assert_eq "$db_link_quaternary" "$planned_db_quaternary_real" "Quaternary OSD DB link does not match dry-run assignment"
+
+    assert_ne "$wal_link_secondary" "$wal_link_quaternary" "Expected distinct WAL partitions per OSD"
+    assert_ne "$db_link_secondary" "$db_link_quaternary" "Expected distinct DB partitions per OSD"
+
+    pass "Multi-OSD WAL/DB assignment is consistent across dry-run and apply"
+}
+
 function show_dsl_final_status() {
     set -eux
 
@@ -863,16 +1227,22 @@ function run_dsl_tests() {
     test_dsl_expression_matching
     test_dsl_invalid_expression
     test_dsl_cli_flag_validation
+    test_dsl_match_mode_role_specific_flags_rejected
+    test_dsl_size_validation_boundaries
 
     test_dsl_wal_db_overlap_rejected
     test_dsl_wal_db_empty_match_nonfatal
     test_dsl_wal_db_insufficient_capacity_non_destructive
     test_dsl_wal_db_dry_run_plan_consistency
+    test_dsl_dry_run_deterministic_output
     test_dsl_wal_db_apply_and_verify_partitions
     test_dsl_idempotency
 
     test_dsl_pristine_check
     test_dsl_pristine_with_wipe_dry_run
+
+    test_dsl_match_mode_wipe_preserves_existing_backing_partitions
+    test_dsl_wal_db_multi_osd_assignment_correctness
 
     show_dsl_final_status
 
@@ -901,6 +1271,8 @@ function parse_dsl_args() {
                 DISK2_NAME="${VM_NAME}-disk2"
                 DISK3_NAME="${VM_NAME}-disk3"
                 DISK4_NAME="${VM_NAME}-disk4"
+                DISK5_NAME="${VM_NAME}-disk5"
+                DISK6_NAME="${VM_NAME}-disk6"
                 shift 2
                 ;;
             --snap-path)

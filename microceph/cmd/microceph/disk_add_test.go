@@ -85,6 +85,20 @@ func TestDiskAddValidateFlags(t *testing.T) {
 			expectError: "--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used",
 		},
 		{
+			name: "wal-wipe requires wal-device outside match mode",
+			cmd: cmdDiskAdd{
+				walWipe: true,
+			},
+			expectError: "--wal-wipe/--wal-encrypt require --wal-device",
+		},
+		{
+			name: "db-encrypt requires db-device outside match mode",
+			cmd: cmdDiskAdd{
+				dbEncrypt: true,
+			},
+			expectError: "--db-wipe/--db-encrypt require --db-device",
+		},
+		{
 			name: "valid osd wal db match mode",
 			cmd: cmdDiskAdd{
 				flagOSDMatch: "eq(@type, 'ssd')",
@@ -116,5 +130,30 @@ func TestPrintDryRunOutputFailsOnValidationError(t *testing.T) {
 	err := cmd.printDryRunOutput(types.DiskAddResponse{ValidationError: "invalid DSL expression"})
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "invalid DSL expression")
+	}
+}
+
+func TestPrintAddDiskFailuresUsesReportErrorWhenReportsExist(t *testing.T) {
+	resp := types.DiskAddResponse{
+		ValidationError: "validation failed",
+		Reports: []types.DiskAddReport{{
+			Path:   "/dev/sdb",
+			Report: "Failure",
+			Error:  "partition create failed",
+		}},
+	}
+
+	err := printAddDiskFailures(resp)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "partition create failed")
+	}
+}
+
+func TestPrintAddDiskFailuresReturnsValidationErrorWhenNoReports(t *testing.T) {
+	resp := types.DiskAddResponse{ValidationError: "invalid payload"}
+
+	err := printAddDiskFailures(resp)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "invalid payload")
 	}
 }

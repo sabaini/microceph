@@ -62,5 +62,13 @@ func ValidateDisksPostMatchFields(req DisksPost) error {
 		return fmt.Errorf("--wal-wipe/--wal-encrypt/--db-wipe/--db-encrypt cannot be used with --osd-match/--wal-match/--db-match")
 	}
 
+	if (req.WALWipe || req.WALEncrypt) && (req.WALDev == nil || strings.TrimSpace(*req.WALDev) == "") {
+		return fmt.Errorf("--wal-wipe/--wal-encrypt require --wal-device")
+	}
+
+	if (req.DBWipe || req.DBEncrypt) && (req.DBDev == nil || strings.TrimSpace(*req.DBDev) == "") {
+		return fmt.Errorf("--db-wipe/--db-encrypt require --db-device")
+	}
+
 	return nil
 }

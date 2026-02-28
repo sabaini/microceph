@@ -2,12 +2,14 @@ package ceph
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/microceph/microceph/api/types"
 	"github.com/canonical/microceph/microceph/database"
 	"github.com/canonical/microceph/microceph/mocks"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -142,4 +144,105 @@ func TestApplyDSLPlannedDisksSkipsPartitionCreationOnDataPreflightFailure(t *tes
 	assert.Contains(t, resp.ValidationError, "not pristine")
 	assert.Empty(t, resp.Reports)
 	assert.Empty(t, runner.Calls)
+}
+
+func TestApplyDSLPlannedDisksRollsBackCreatedPartitionsOnAddFailure(t *testing.T) {
+	mgr := NewOSDManager(nil)
+	mgr.fs = afero.NewMemMapFs()
+
+	err := mgr.fs.MkdirAll("/dev", 0755)
+	assert.NoError(t, err)
+	err = afero.WriteFile(mgr.fs, "/dev/waldisk1", []byte{}, 0644)
+	assert.NoError(t, err)
+	err = afero.WriteFile(mgr.fs, "/dev/dbdisk1", []byte{}, 0644)
+	assert.NoError(t, err)
+
+	storage := mocks.NewStorageInterface(t)
+	storage.On("GetStorage").Return(nil, fmt.Errorf("storage unavailable")).Maybe()
+	mgr.storage = storage
+
+	runner := mocks.NewRunner(t)
+	runner.On("RunCommand", "sgdisk", "--new=1:0:+2", "--typecode=1:8300", "/dev/wal-disk").Return("", nil).Once()
+	runner.On("RunCommand", "sgdisk", "--new=1:0:+2", "--typecode=1:8300", "/dev/db-disk").Return("", nil).Once()
+	runner.On("RunCommand", "sgdisk", "--delete=1", "/dev/db-disk").Return("", nil).Once()
+	runner.On("RunCommand", "sgdisk", "--delete=1", "/dev/wal-disk").Return("", nil).Once()
+	mgr.runner = runner
+
+	matchedOSDs := []api.ResourcesStorageDisk{{ID: "sdb", DeviceID: "osd-a", Device: "8:16"}}
+	walPlan := []plannedPartition{{
+		Role:      "wal",
+		DiskPath:  "/dev/wal-disk",
+		DiskID:    "waldisk",
+		PartNum:   1,
+		PartSize:  1024,
+		ForOSDIdx: 0,
+	}}
+	dbPlan := []plannedPartition{{
+		Role:      "db",
+		DiskPath:  "/dev/db-disk",
+		DiskID:    "dbdisk",
+		PartNum:   1,
+		PartSize:  1024,
+		ForOSDIdx: 0,
+	}}
+
+	preflight := func([]api.ResourcesStorageDisk, bool, bool) error {
+		return nil
+	}
+	addDisk := func(ctx context.Context, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport {
+		return types.DiskAddReport{Path: data.Path, Report: "Failure", Error: "simulated add failure"}
+	}
+
+	resp := mgr.applyDSLPlannedDisksWithHooks(context.Background(), matchedOSDs, walPlan, dbPlan, false, false, false, preflight, addDisk)
+
+	assert.Empty(t, resp.ValidationError)
+	assert.Len(t, resp.Reports, 1)
+	assert.Equal(t, "Failure", resp.Reports[0].Report)
+}
+
+func TestApplyDSLPlannedDisksPartitionFailureDoesNotHidePriorSuccess(t *testing.T) {
+	mgr := NewOSDManager(nil)
+	mgr.fs = afero.NewMemMapFs()
+
+	err := mgr.fs.MkdirAll("/dev", 0755)
+	assert.NoError(t, err)
+	err = afero.WriteFile(mgr.fs, "/dev/waldisk1", []byte{}, 0644)
+	assert.NoError(t, err)
+	// No /dev/waldisk2 file needed because second create command is forced to fail.
+
+	storage := mocks.NewStorageInterface(t)
+	storage.On("GetStorage").Return(nil, fmt.Errorf("storage unavailable")).Maybe()
+	mgr.storage = storage
+
+	runner := mocks.NewRunner(t)
+	runner.On("RunCommand", "sgdisk", "--new=1:0:+2", "--typecode=1:8300", "/dev/wal-disk").Return("", nil).Once()
+	runner.On("RunCommand", "sgdisk", "--new=2:0:+2", "--typecode=2:8300", "/dev/wal-disk").Return("", fmt.Errorf("simulated partition create failure")).Once()
+	mgr.runner = runner
+
+	matchedOSDs := []api.ResourcesStorageDisk{
+		{ID: "sdb", DeviceID: "osd-a", Device: "8:16"},
+		{ID: "sdc", DeviceID: "osd-b", Device: "8:32"},
+	}
+	walPlan := []plannedPartition{
+		{Role: "wal", DiskPath: "/dev/wal-disk", DiskID: "waldisk", PartNum: 1, PartSize: 1024, ForOSDIdx: 0},
+		{Role: "wal", DiskPath: "/dev/wal-disk", DiskID: "waldisk", PartNum: 2, PartSize: 1024, ForOSDIdx: 1},
+	}
+
+	preflight := func([]api.ResourcesStorageDisk, bool, bool) error {
+		return nil
+	}
+	addCalls := 0
+	addDisk := func(ctx context.Context, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport {
+		addCalls++
+		return types.DiskAddReport{Path: data.Path, Report: "Success", Error: ""}
+	}
+
+	resp := mgr.applyDSLPlannedDisksWithHooks(context.Background(), matchedOSDs, walPlan, nil, false, false, false, preflight, addDisk)
+
+	assert.Empty(t, resp.ValidationError)
+	assert.Len(t, resp.Reports, 2)
+	assert.Equal(t, "Success", resp.Reports[0].Report)
+	assert.Equal(t, "Failure", resp.Reports[1].Report)
+	assert.Contains(t, resp.Reports[1].Error, "failed creating wal partition")
+	assert.Equal(t, 1, addCalls)
 }

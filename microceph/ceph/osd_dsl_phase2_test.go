@@ -116,6 +116,24 @@ func TestPlanRolePartitionsForBackingDisksIgnoresGlobalWipe(t *testing.T) {
 	assert.Equal(t, uint64(3), plan[0].PartNum)
 }
 
+func TestParsePartitionSizeAcceptsFractionalGiB(t *testing.T) {
+	size, err := parsePartitionSize("0.5GiB", "wal")
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(512*1024*1024), size)
+}
+
+func TestParsePartitionSizeRejectsFractionalByteValues(t *testing.T) {
+	_, err := parsePartitionSize("1.5B", "wal")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "whole number of bytes")
+}
+
+func TestParsePartitionSizeRejectsSubByteValues(t *testing.T) {
+	_, err := parsePartitionSize("0.5B", "db")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "whole number of bytes")
+}
+
 func TestHasMountedPartitions(t *testing.T) {
 	disk := api.ResourcesStorageDisk{
 		Partitions: []api.ResourcesStorageDiskPartition{{Partition: 1, Mounted: false}},

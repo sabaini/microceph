@@ -1253,21 +1253,64 @@ func (m *OSDManager) preflightMatchedOSDDisks(matchedOSDs []api.ResourcesStorage
 	return nil
 }
 
-func (m *OSDManager) applyDSLPlannedDisks(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, walPlan []plannedPartition, dbPlan []plannedPartition, encrypt bool, wipe bool, backingWipe bool) types.DiskAddResponse {
-	err := m.preflightMatchedOSDDisks(matchedOSDs, wipe, encrypt)
+type dslPreflightFunc func(matchedOSDs []api.ResourcesStorageDisk, wipe bool, encrypt bool) error
+
+type dslAddDiskFunc func(ctx context.Context, data types.DiskParameter, wal *types.DiskParameter, db *types.DiskParameter) types.DiskAddReport
+
+func plansByOSDIndex(plan []plannedPartition) map[int]plannedPartition {
+	indexed := make(map[int]plannedPartition, len(plan))
+	for _, p := range plan {
+		indexed[p.ForOSDIdx] = p
+	}
+	return indexed
+}
+
+func (m *OSDManager) rollbackPlannedPartitions(plan []plannedPartition) error {
+	if len(plan) == 0 {
+		return nil
+	}
+
+	unique := make(map[string]plannedPartition, len(plan))
+	for _, p := range plan {
+		key := fmt.Sprintf("%s#%d", p.DiskPath, p.PartNum)
+		unique[key] = p
+	}
+
+	toRollback := make([]plannedPartition, 0, len(unique))
+	for _, p := range unique {
+		toRollback = append(toRollback, p)
+	}
+
+	sort.Slice(toRollback, func(i, j int) bool {
+		if toRollback[i].DiskPath == toRollback[j].DiskPath {
+			return toRollback[i].PartNum > toRollback[j].PartNum
+		}
+		return toRollback[i].DiskPath < toRollback[j].DiskPath
+	})
+
+	var rollbackErrors []string
+	for _, p := range toRollback {
+		_, err := m.runner.RunCommand("sgdisk", fmt.Sprintf("--delete=%d", p.PartNum), p.DiskPath)
+		if err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s partition %d on %s: %v", p.Role, p.PartNum, p.DiskPath, err))
+		}
+	}
+
+	if len(rollbackErrors) > 0 {
+		return fmt.Errorf("failed to rollback planned partitions: %s", strings.Join(rollbackErrors, "; "))
+	}
+
+	return nil
+}
+
+func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, walPlan []plannedPartition, dbPlan []plannedPartition, encrypt bool, wipe bool, backingWipe bool, preflight dslPreflightFunc, addDisk dslAddDiskFunc) types.DiskAddResponse {
+	err := preflight(matchedOSDs, wipe, encrypt)
 	if err != nil {
 		return types.DiskAddResponse{ValidationError: err.Error()}
 	}
 
-	walPaths, err := m.createPlannedPartitions(walPlan, backingWipe)
-	if err != nil {
-		return types.DiskAddResponse{ValidationError: err.Error()}
-	}
-
-	dbPaths, err := m.createPlannedPartitions(dbPlan, backingWipe)
-	if err != nil {
-		return types.DiskAddResponse{ValidationError: err.Error()}
-	}
+	walByOSD := plansByOSDIndex(walPlan)
+	dbByOSD := plansByOSDIndex(dbPlan)
 
 	ret := types.DiskAddResponse{ValidationError: ""}
 	for i, disk := range matchedOSDs {
@@ -1278,20 +1321,60 @@ func (m *OSDManager) applyDSLPlannedDisks(ctx context.Context, matchedOSDs []api
 			LoopSize: 0,
 		}
 
+		createdForOSD := make([]plannedPartition, 0, 2)
+
 		var wal *types.DiskParameter
-		if len(walPaths) > i {
-			wal = &types.DiskParameter{Path: walPaths[i], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+		if p, ok := walByOSD[i]; ok {
+			paths, err := m.createPlannedPartitions([]plannedPartition{p}, backingWipe)
+			if err != nil {
+				finalErr := err
+				if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
+					logger.Warnf("Failed to rollback planned partitions for %s after WAL partition creation error: %v", data.Path, rollbackErr)
+					finalErr = fmt.Errorf("%v (rollback failure: %v)", err, rollbackErr)
+				}
+				ret.Reports = append(ret.Reports, types.DiskAddReport{Path: data.Path, Report: "Failure", Error: finalErr.Error()})
+				continue
+			}
+
+			if len(paths) > 0 {
+				wal = &types.DiskParameter{Path: paths[0], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+			}
+			createdForOSD = append(createdForOSD, p)
 		}
 
 		var db *types.DiskParameter
-		if len(dbPaths) > i {
-			db = &types.DiskParameter{Path: dbPaths[i], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+		if p, ok := dbByOSD[i]; ok {
+			paths, err := m.createPlannedPartitions([]plannedPartition{p}, backingWipe)
+			if err != nil {
+				finalErr := err
+				if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
+					logger.Warnf("Failed to rollback planned partitions for %s after DB partition creation error: %v", data.Path, rollbackErr)
+					finalErr = fmt.Errorf("%v (rollback failure: %v)", err, rollbackErr)
+				}
+				ret.Reports = append(ret.Reports, types.DiskAddReport{Path: data.Path, Report: "Failure", Error: finalErr.Error()})
+				continue
+			}
+
+			if len(paths) > 0 {
+				db = &types.DiskParameter{Path: paths[0], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+			}
+			createdForOSD = append(createdForOSD, p)
 		}
 
-		ret.Reports = append(ret.Reports, m.addSingleDisk(ctx, data, wal, db))
+		report := addDisk(ctx, data, wal, db)
+		ret.Reports = append(ret.Reports, report)
+		if report.Report != "Success" {
+			if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
+				logger.Warnf("Failed to rollback planned partitions for failed OSD %s: %v", data.Path, rollbackErr)
+			}
+		}
 	}
 
 	return ret
+}
+
+func (m *OSDManager) applyDSLPlannedDisks(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, walPlan []plannedPartition, dbPlan []plannedPartition, encrypt bool, wipe bool, backingWipe bool) types.DiskAddResponse {
+	return m.applyDSLPlannedDisksWithHooks(ctx, matchedOSDs, walPlan, dbPlan, encrypt, wipe, backingWipe, m.preflightMatchedOSDDisks, m.addSingleDisk)
 }
 
 type plannedPartition struct {
@@ -1315,7 +1398,21 @@ func parsePartitionSize(size string, role string) (uint64, error) {
 		return 0, fmt.Errorf("invalid %s size %q: must be greater than zero", role, size)
 	}
 
-	return uint64(value), nil
+	if value > float64(^uint64(0)) {
+		return 0, fmt.Errorf("invalid %s size %q: value is too large", role, size)
+	}
+
+	rounded := math.Round(value)
+	if math.Abs(value-rounded) > 1e-6 {
+		return 0, fmt.Errorf("invalid %s size %q: must resolve to a whole number of bytes", role, size)
+	}
+
+	sizeBytes := uint64(rounded)
+	if sizeBytes == 0 {
+		return 0, fmt.Errorf("invalid %s size %q: must be at least 1 byte", role, size)
+	}
+
+	return sizeBytes, nil
 }
 
 func getKernelPartitionPath(diskID string, partNum uint64) string {
@@ -1749,8 +1846,22 @@ func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool)
 
 func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error) {
 	deadline := time.Now().Add(20 * time.Second)
+	directExpectedPath := part.PartPath
+	directFallbackPath := getKernelPartitionPath(part.DiskID, part.PartNum)
 
 	for time.Now().Before(deadline) {
+		if directExpectedPath != "" {
+			if exists, _ := afero.Exists(m.fs, directExpectedPath); exists {
+				return directExpectedPath, nil
+			}
+		}
+
+		if directFallbackPath != "" {
+			if exists, _ := afero.Exists(m.fs, directFallbackPath); exists {
+				return directFallbackPath, nil
+			}
+		}
+
 		storage, err := m.storage.GetStorage()
 		if err == nil {
 			for _, disk := range storage.Disks {
@@ -1774,13 +1885,6 @@ func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error)
 						}
 					}
 				}
-			}
-		}
-
-		fallback := getKernelPartitionPath(part.DiskID, part.PartNum)
-		if fallback != "" {
-			if exists, _ := afero.Exists(m.fs, fallback); exists {
-				return fallback, nil
 			}
 		}
 

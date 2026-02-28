@@ -294,12 +294,12 @@ func printAddDiskFailures(response types.DiskAddResponse) error {
 	var errStr string
 	data := [][]string{}
 
-	if len(response.ValidationError) != 0 {
-		fmt.Println("Validation Error found")
-		return fmt.Errorf(response.ValidationError)
-	}
-
 	if len(response.Reports) == 0 {
+		if len(response.ValidationError) != 0 {
+			fmt.Println("Validation Error found")
+			return fmt.Errorf(response.ValidationError)
+		}
+
 		// No responses; nothing to do.
 		return nil
 	}
@@ -314,7 +314,7 @@ func printAddDiskFailures(response types.DiskAddResponse) error {
 		data = append(data, []string{report.Path, report.Report})
 	}
 
-	// Print disk add failures in tabulated form.
+	// Print disk add results in tabulated form.
 	fmt.Println("")
 	header := []string{"Path", "Status"}
 	sort.Sort(lxdCmd.SortColumnsNaturally(data))
@@ -329,6 +329,11 @@ func printAddDiskFailures(response types.DiskAddResponse) error {
 	} else if failureCount > 1 {
 		// Print error if only one instance of error is there.
 		return fmt.Errorf("failed adding multiple (%d) disks, please check logs for details", failureCount)
+	}
+
+	if len(response.ValidationError) != 0 {
+		fmt.Println("Validation Error found")
+		return fmt.Errorf(response.ValidationError)
 	}
 
 	return nil
