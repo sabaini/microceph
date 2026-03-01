@@ -1930,10 +1930,33 @@ func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool)
 	return paths, nil
 }
 
+const (
+	partitionPathWaitTimeout      = 60 * time.Second
+	partitionPathPollInterval     = 500 * time.Millisecond
+	partitionTableRefreshInterval = 2 * time.Second
+)
+
+func (m *OSDManager) refreshPartitionTable(diskPath string) {
+	if diskPath == "" {
+		return
+	}
+
+	if _, err := m.runner.RunCommand("partprobe", diskPath); err != nil {
+		if _, partxErr := m.runner.RunCommand("partx", "-u", diskPath); partxErr != nil {
+			logger.Debugf("DSL: failed to refresh partition table for %s via partprobe (%v) and partx (%v)", diskPath, err, partxErr)
+		}
+	}
+
+	if _, err := m.runner.RunCommand("udevadm", "settle"); err != nil {
+		logger.Debugf("DSL: udevadm settle failed while waiting for partitions on %s: %v", diskPath, err)
+	}
+}
+
 func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error) {
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(partitionPathWaitTimeout)
 	directExpectedPath := part.PartPath
 	directFallbackPath := getKernelPartitionPath(part.DiskID, part.PartNum)
+	nextRefresh := time.Now()
 
 	for time.Now().Before(deadline) {
 		if directExpectedPath != "" {
@@ -1974,7 +1997,13 @@ func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error)
 			}
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		now := time.Now()
+		if !now.Before(nextRefresh) {
+			m.refreshPartitionTable(part.DiskPath)
+			nextRefresh = now.Add(partitionTableRefreshInterval)
+		}
+
+		time.Sleep(partitionPathPollInterval)
 	}
 
 	logger.Warnf("DSL: timed out waiting for %s partition %d on %s (expected=%s fallback=%s)", part.Role, part.PartNum, part.DiskPath, directExpectedPath, directFallbackPath)
