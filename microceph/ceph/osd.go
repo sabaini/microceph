@@ -963,6 +963,7 @@ type DSLMatchResult struct {
 // Returns matched disks or an error. If dryRun is true, returns device info without adding.
 func (m *OSDManager) MatchDisksWithDSL(ctx context.Context, dslExpr string, dryRun bool) (*DSLMatchResult, error) {
 	result := &DSLMatchResult{}
+	logger.Debugf("DSL: OSD match request: expr=%q dry_run=%v", dslExpr, dryRun)
 
 	// Parse the DSL expression
 	expr, err := dsl.Parse(dslExpr)
@@ -998,6 +999,7 @@ func (m *OSDManager) MatchDisksWithDSL(ctx context.Context, dslExpr string, dryR
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter available disks: %w", err)
 	}
+	logger.Debugf("DSL: OSD candidate summary: total_disks=%d configured_disks=%d available_disks=%d", len(storage.Disks), len(configuredDisks), len(availableDisks))
 
 	// Get hostname for DSL evaluation
 	hostname, err := os.Hostname()
@@ -1017,6 +1019,7 @@ func (m *OSDManager) MatchDisksWithDSL(ctx context.Context, dslExpr string, dryR
 	}
 
 	result.MatchedDisks = matchedDisks
+	logger.Debugf("DSL: OSD match result: matched_disks=%d", len(matchedDisks))
 
 	// Build dry-run device info if requested
 	if dryRun {
@@ -1108,8 +1111,9 @@ func (m *OSDManager) parseDSLBackingSpec(walExpr string, dbExpr string, walSize 
 	return dslBackingSpec{wal: walSpec, db: dbSpec}, nil
 }
 
-func (m *OSDManager) planDSLBacking(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, spec dslBackingSpec, backingWipe bool) (dslBackingPlan, error) {
+func (m *OSDManager) planDSLBacking(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, spec dslBackingSpec, candidateWipe bool, backingWipe bool) (dslBackingPlan, error) {
 	plan := dslBackingPlan{}
+	logger.Debugf("DSL: planning backing: osd_count=%d candidate_wipe=%v backing_wipe=%v wal_expr_set=%v db_expr_set=%v", len(matchedOSDs), candidateWipe, backingWipe, spec.wal.expr != "", spec.db.expr != "")
 
 	storage, err := m.storage.GetStorage()
 	if err != nil {
@@ -1121,22 +1125,31 @@ func (m *OSDManager) planDSLBacking(ctx context.Context, matchedOSDs []api.Resou
 		return plan, err
 	}
 
-	walCandidates, err := m.getWALDBCandidateDisks(ctx, storage, clusterFSID, backingWipe)
+	walCandidates, err := m.getWALDBCandidateDisks(ctx, storage, clusterFSID, candidateWipe)
 	if err != nil {
 		return plan, err
 	}
+	logger.Debugf("DSL: WAL/DB candidate disks discovered: %d", len(walCandidates))
 
 	matchedWALDisks, validationErr := m.matchDisksFromSet(spec.wal.expr, walCandidates)
 	if validationErr != "" {
 		return plan, errors.New(validationErr)
 	}
 	plan.walDisks = matchedWALDisks
+	logger.Debugf("DSL: WAL match result: matched_disks=%d expr=%q", len(plan.walDisks), spec.wal.expr)
+	if spec.wal.expr != "" && len(plan.walDisks) == 0 {
+		logger.Debugf("DSL: WAL expression matched zero candidate disks; WAL assignments may be empty")
+	}
 
 	matchedDBDisks, validationErr := m.matchDisksFromSet(spec.db.expr, walCandidates)
 	if validationErr != "" {
 		return plan, errors.New(validationErr)
 	}
 	plan.dbDisks = matchedDBDisks
+	logger.Debugf("DSL: DB match result: matched_disks=%d expr=%q", len(plan.dbDisks), spec.db.expr)
+	if spec.db.expr != "" && len(plan.dbDisks) == 0 {
+		logger.Debugf("DSL: DB expression matched zero candidate disks; DB assignments may be empty")
+	}
 
 	if err := validateNoDiskOverlap(matchedOSDs, plan.walDisks, plan.dbDisks); err != nil {
 		return plan, err
@@ -1151,6 +1164,8 @@ func (m *OSDManager) planDSLBacking(ctx context.Context, matchedOSDs []api.Resou
 	if err != nil {
 		return plan, err
 	}
+
+	logger.Debugf("DSL: WAL/DB partition plan summary: wal_partitions=%d db_partitions=%d osd_count=%d", len(plan.walPlan), len(plan.dbPlan), len(matchedOSDs))
 
 	return plan, nil
 }
@@ -1172,6 +1187,8 @@ func buildDSLDryRunResponse(osdDryRun []types.DryRunDevice, matchedOSDs []api.Re
 // AddDisksWithDSL adds disks matching DSL expressions as OSDs.
 // Optional WAL/DB expressions are used to create and assign one partition per new OSD.
 func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExpr string, dbExpr string, walSize string, dbSize string, encrypt bool, wipe bool, dryRun bool) types.DiskAddResponse {
+	logger.Debugf("DSL: AddDisksWithDSL request: osd_match=%q wal_match=%q db_match=%q wal_size=%q db_size=%q encrypt=%v wipe=%v dry_run=%v", osdExpr, walExpr, dbExpr, walSize, dbSize, encrypt, wipe, dryRun)
+
 	osdResult, err := m.MatchDisksWithDSL(ctx, osdExpr, dryRun)
 	if err != nil {
 		return types.DiskAddResponse{ValidationError: err.Error()}
@@ -1183,6 +1200,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 
 	matchedOSDs := osdResult.MatchedDisks
 	sortDisksByDevicePath(matchedOSDs)
+	logger.Debugf("DSL: AddDisksWithDSL matched OSD disks: %d", len(matchedOSDs))
 
 	backingSpec, err := m.parseDSLBackingSpec(walExpr, dbExpr, walSize, dbSize)
 	if err != nil {
@@ -1190,6 +1208,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 	}
 
 	if len(matchedOSDs) == 0 {
+		logger.Debugf("DSL: no OSD disks matched expression")
 		if dryRun {
 			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
 		}
@@ -1197,6 +1216,7 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 	}
 
 	if !backingSpec.Enabled() {
+		logger.Debugf("DSL: no WAL/DB backing expressions set; proceeding with data-only add")
 		if dryRun {
 			return types.DiskAddResponse{DryRunDevices: osdResult.DryRunDevices}
 		}
@@ -1204,10 +1224,15 @@ func (m *OSDManager) AddDisksWithDSL(ctx context.Context, osdExpr string, walExp
 	}
 
 	backingWipe := backingDiskWipeEnabled(wipe)
-	backingPlan, err := m.planDSLBacking(ctx, matchedOSDs, backingSpec, backingWipe)
+	// Global --wipe still applies to candidate eligibility checks so non-pristine
+	// backing devices can be matched when explicitly requested, while actual WAL/DB
+	// partition planning keeps backingWipe semantics (currently disabled).
+	backingPlan, err := m.planDSLBacking(ctx, matchedOSDs, backingSpec, wipe, backingWipe)
 	if err != nil {
 		return types.DiskAddResponse{ValidationError: err.Error()}
 	}
+
+	logger.Debugf("DSL: AddDisksWithDSL backing plan summary: wal_disks=%d db_disks=%d wal_partitions=%d db_partitions=%d", len(backingPlan.walDisks), len(backingPlan.dbDisks), len(backingPlan.walPlan), len(backingPlan.dbPlan))
 
 	if dryRun {
 		return buildDSLDryRunResponse(osdResult.DryRunDevices, matchedOSDs, backingPlan)
@@ -1270,6 +1295,8 @@ func (m *OSDManager) rollbackPlannedPartitions(plan []plannedPartition) error {
 		return nil
 	}
 
+	logger.Debugf("DSL: rolling back planned partitions: requested=%d", len(plan))
+
 	unique := make(map[string]plannedPartition, len(plan))
 	for _, p := range plan {
 		key := fmt.Sprintf("%s#%d", p.DiskPath, p.PartNum)
@@ -1300,12 +1327,16 @@ func (m *OSDManager) rollbackPlannedPartitions(plan []plannedPartition) error {
 		return fmt.Errorf("failed to rollback planned partitions: %s", strings.Join(rollbackErrors, "; "))
 	}
 
+	logger.Debugf("DSL: rollback planned partitions completed successfully: partitions=%d", len(toRollback))
 	return nil
 }
 
 func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedOSDs []api.ResourcesStorageDisk, walPlan []plannedPartition, dbPlan []plannedPartition, encrypt bool, wipe bool, backingWipe bool, preflight dslPreflightFunc, addDisk dslAddDiskFunc) types.DiskAddResponse {
+	logger.Debugf("DSL: applying planned disks: osds=%d wal_partitions=%d db_partitions=%d encrypt=%v wipe=%v backing_wipe=%v", len(matchedOSDs), len(walPlan), len(dbPlan), encrypt, wipe, backingWipe)
+
 	err := preflight(matchedOSDs, wipe, encrypt)
 	if err != nil {
+		logger.Debugf("DSL: preflight failed: %v", err)
 		return types.DiskAddResponse{ValidationError: err.Error()}
 	}
 
@@ -1322,6 +1353,9 @@ func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedO
 		}
 
 		createdForOSD := make([]plannedPartition, 0, 2)
+		_, walPlanned := walByOSD[i]
+		_, dbPlanned := dbByOSD[i]
+		logger.Debugf("DSL: applying OSD index=%d data_path=%s wal_planned=%v db_planned=%v", i, data.Path, walPlanned, dbPlanned)
 
 		var wal *types.DiskParameter
 		if p, ok := walByOSD[i]; ok {
@@ -1329,7 +1363,7 @@ func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedO
 			if err != nil {
 				finalErr := err
 				if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
-					logger.Warnf("Failed to rollback planned partitions for %s after WAL partition creation error: %v", data.Path, rollbackErr)
+					logger.Warnf("DSL: failed to rollback planned partitions for %s after WAL partition creation error: %v", data.Path, rollbackErr)
 					finalErr = fmt.Errorf("%v (rollback failure: %v)", err, rollbackErr)
 				}
 				ret.Reports = append(ret.Reports, types.DiskAddReport{Path: data.Path, Report: "Failure", Error: finalErr.Error()})
@@ -1338,6 +1372,7 @@ func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedO
 
 			if len(paths) > 0 {
 				wal = &types.DiskParameter{Path: paths[0], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+				logger.Debugf("DSL: prepared WAL partition for %s: %s", data.Path, wal.Path)
 			}
 			createdForOSD = append(createdForOSD, p)
 		}
@@ -1348,7 +1383,7 @@ func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedO
 			if err != nil {
 				finalErr := err
 				if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
-					logger.Warnf("Failed to rollback planned partitions for %s after DB partition creation error: %v", data.Path, rollbackErr)
+					logger.Warnf("DSL: failed to rollback planned partitions for %s after DB partition creation error: %v", data.Path, rollbackErr)
 					finalErr = fmt.Errorf("%v (rollback failure: %v)", err, rollbackErr)
 				}
 				ret.Reports = append(ret.Reports, types.DiskAddReport{Path: data.Path, Report: "Failure", Error: finalErr.Error()})
@@ -1357,18 +1392,28 @@ func (m *OSDManager) applyDSLPlannedDisksWithHooks(ctx context.Context, matchedO
 
 			if len(paths) > 0 {
 				db = &types.DiskParameter{Path: paths[0], Encrypt: encrypt, Wipe: false, LoopSize: 0}
+				logger.Debugf("DSL: prepared DB partition for %s: %s", data.Path, db.Path)
 			}
 			createdForOSD = append(createdForOSD, p)
 		}
 
 		report := addDisk(ctx, data, wal, db)
 		ret.Reports = append(ret.Reports, report)
+		logger.Debugf("DSL: add result for %s: %s", data.Path, report.Report)
 		if report.Report != "Success" {
 			if rollbackErr := m.rollbackPlannedPartitions(createdForOSD); rollbackErr != nil {
-				logger.Warnf("Failed to rollback planned partitions for failed OSD %s: %v", data.Path, rollbackErr)
+				logger.Warnf("DSL: failed to rollback planned partitions for failed OSD %s: %v", data.Path, rollbackErr)
 			}
 		}
 	}
+
+	failureCount := 0
+	for _, r := range ret.Reports {
+		if r.Report != "Success" {
+			failureCount++
+		}
+	}
+	logger.Debugf("DSL: apply completed: reports=%d failures=%d validation_error=%q", len(ret.Reports), failureCount, ret.ValidationError)
 
 	return ret
 }
@@ -1477,40 +1522,56 @@ func (m *OSDManager) getWALDBCandidateDisks(ctx context.Context, storage *api.Re
 	}
 
 	candidates := make([]api.ResourcesStorageDisk, 0, len(storage.Disks))
+	skipReadOnly := 0
+	skipConfigured := 0
+	skipMounted := 0
+	skipMountCheckError := 0
+	skipIneligible := 0
+	skipEligibilityError := 0
+
 	for _, disk := range storage.Disks {
 		if disk.ReadOnly {
+			skipReadOnly++
 			continue
 		}
 
 		devicePath := common.GetDevicePath(&disk)
 		if _, exists := configuredPaths[devicePath]; exists {
+			skipConfigured++
 			continue
 		}
 
 		if disk.Mounted || hasMountedPartitions(disk) {
+			skipMounted++
 			continue
 		}
 
 		mounted, err := m.mountChecker.IsMounted(devicePath)
 		if err != nil {
-			logger.Warnf("Skipping WAL/DB candidate %s: failed to check mounted state: %v", devicePath, err)
+			skipMountCheckError++
+			logger.Warnf("DSL: skipping WAL/DB candidate %s: failed to check mounted state: %v", devicePath, err)
 			continue
 		}
 		if mounted {
+			skipMounted++
 			continue
 		}
 
 		ok, err := m.diskEligibleForWALDB(disk, clusterFSID, wipe)
 		if err != nil {
-			logger.Warnf("Skipping WAL/DB candidate %s: %v", devicePath, err)
+			skipEligibilityError++
+			logger.Warnf("DSL: skipping WAL/DB candidate %s: %v", devicePath, err)
 			continue
 		}
 		if !ok {
+			skipIneligible++
 			continue
 		}
 
 		candidates = append(candidates, disk)
 	}
+
+	logger.Debugf("DSL: WAL/DB candidate selection summary: total=%d candidates=%d skipped_read_only=%d skipped_configured=%d skipped_mounted=%d skipped_mount_check_error=%d skipped_ineligible=%d skipped_eligibility_error=%d wipe=%v", len(storage.Disks), len(candidates), skipReadOnly, skipConfigured, skipMounted, skipMountCheckError, skipIneligible, skipEligibilityError, wipe)
 
 	return candidates, nil
 }
@@ -1525,14 +1586,23 @@ func hasMountedPartitions(disk api.ResourcesStorageDisk) bool {
 }
 
 func (m *OSDManager) diskEligibleForWALDB(disk api.ResourcesStorageDisk, clusterFSID string, wipe bool) (bool, error) {
+	devicePath := common.GetDevicePath(&disk)
+
 	if wipe {
+		logger.Debugf("DSL: WAL/DB eligibility accepted for %s because wipe=true", devicePath)
 		return true, nil
 	}
 
-	devicePath := common.GetDevicePath(&disk)
 	isPristine, err := m.pristineChecker.IsPristineDisk(devicePath)
 	if err == nil && isPristine {
+		logger.Debugf("DSL: WAL/DB eligibility accepted for %s: pristine disk", devicePath)
 		return true, nil
+	}
+
+	if err != nil {
+		logger.Debugf("DSL: WAL/DB pristine check error on %s: %v (falling back to Ceph label checks)", devicePath, err)
+	} else {
+		logger.Debugf("DSL: WAL/DB disk %s is not pristine; checking Ceph labels for cluster FSID", devicePath)
 	}
 
 	pathsToProbe := []string{devicePath}
@@ -1553,10 +1623,17 @@ func (m *OSDManager) diskEligibleForWALDB(disk api.ResourcesStorageDisk, cluster
 		}
 
 		if fsid != clusterFSID {
+			logger.Debugf("DSL: WAL/DB eligibility rejected for %s: found foreign Ceph FSID %q on %s (cluster FSID %q)", devicePath, fsid, path, clusterFSID)
 			return false, nil
 		}
 
 		foundClusterFSID = true
+	}
+
+	if foundClusterFSID {
+		logger.Debugf("DSL: WAL/DB eligibility accepted for %s: found matching cluster FSID labels", devicePath)
+	} else {
+		logger.Debugf("DSL: WAL/DB eligibility rejected for %s: no matching cluster FSID labels found", devicePath)
 	}
 
 	return foundClusterFSID, nil
@@ -1618,6 +1695,7 @@ func (m *OSDManager) matchDisksFromSet(expr string, disks []api.ResourcesStorage
 	sort.Slice(matched, func(i, j int) bool {
 		return dsl.GetDevicePath(matched[i]) < dsl.GetDevicePath(matched[j])
 	})
+	logger.Debugf("DSL: set match result: expr=%q input_disks=%d matched_disks=%d", expr, len(disks), len(matched))
 
 	return matched, ""
 }
@@ -1661,6 +1739,8 @@ func planRolePartitions(role string, disks []api.ResourcesStorageDisk, partSize 
 	if len(disks) == 0 || partSize == 0 || osdCount == 0 {
 		return nil, nil
 	}
+
+	logger.Debugf("DSL: planning %s partitions: candidate_disks=%d part_size=%s osd_count=%d wipe=%v", role, len(disks), formatBytesIEC(int64(partSize)), osdCount, wipe)
 
 	type roleAlloc struct {
 		disk     api.ResourcesStorageDisk
@@ -1747,6 +1827,7 @@ func planRolePartitions(role string, disks []api.ResourcesStorageDisk, partSize 
 	sort.Slice(plan, func(i, j int) bool {
 		return plan[i].ForOSDIdx < plan[j].ForOSDIdx
 	})
+	logger.Debugf("DSL: planned %s partitions: %d", role, len(plan))
 
 	return plan, nil
 }
@@ -1806,6 +1887,8 @@ func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool)
 		return nil, nil
 	}
 
+	logger.Debugf("DSL: creating planned partitions: count=%d wipe=%v", len(plan), wipe)
+
 	wiped := map[string]struct{}{}
 	paths := make([]string, len(plan))
 	for i, p := range plan {
@@ -1823,6 +1906,8 @@ func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool)
 			return nil, fmt.Errorf("invalid zero-size %s partition request", p.Role)
 		}
 
+		logger.Debugf("DSL: creating %s partition: disk=%s part_num=%d size_bytes=%d sectors=%d", p.Role, p.DiskPath, p.PartNum, p.PartSize, sectors)
+
 		_, err := m.runner.RunCommand(
 			"sgdisk",
 			fmt.Sprintf("--new=%d:0:+%d", p.PartNum, sectors),
@@ -1837,6 +1922,7 @@ func (m *OSDManager) createPlannedPartitions(plan []plannedPartition, wipe bool)
 		if err != nil {
 			return nil, err
 		}
+		logger.Debugf("DSL: resolved %s partition path: %s", p.Role, resolved)
 
 		paths[i] = resolved
 	}
@@ -1891,6 +1977,7 @@ func (m *OSDManager) waitForPartitionPath(part plannedPartition) (string, error)
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	logger.Warnf("DSL: timed out waiting for %s partition %d on %s (expected=%s fallback=%s)", part.Role, part.PartNum, part.DiskPath, directExpectedPath, directFallbackPath)
 	return "", fmt.Errorf("timed out waiting for %s partition %d on %s", part.Role, part.PartNum, part.DiskPath)
 }
 

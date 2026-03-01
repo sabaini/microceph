@@ -146,6 +146,7 @@ Limitations:
 - ``--wal-wipe``/``--wal-encrypt``/``--db-wipe``/``--db-encrypt`` cannot be combined with match mode flags.
 - ``--wal-wipe``/``--wal-encrypt`` require ``--wal-device`` and ``--db-wipe``/``--db-encrypt`` require ``--db-device``.
 - ``--wipe`` in match mode applies to OSD data devices only; WAL/DB backing disks matched via ``--wal-match``/``--db-match`` are not wiped.
+- ``--wipe`` still relaxes backing-disk eligibility checks (non-pristine backing devices can be matched), but no backing-disk wipe is performed.
 
 
 ``list``

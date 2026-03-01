@@ -217,7 +217,35 @@ function first_partition_path() {
 function partition_path_by_number() {
     local devnode="$1"
     local part_num="$2"
-    vm_sh "lsblk -nr -o PATH,PARTN '${devnode}' | awk '\$2 == \"${part_num}\" {print \$1; exit}'"
+    local fallback_path
+    local detected_path
+
+    if [[ "$devnode" =~ [0-9]$ ]]; then
+        fallback_path="${devnode}p${part_num}"
+    else
+        fallback_path="${devnode}${part_num}"
+    fi
+
+    # Kernel partition table updates can lag behind sgdisk writes in VMs.
+    # Retry with partprobe/partx + udev settle before giving up.
+    for _ in $(seq 1 20); do
+        detected_path=$(vm_sh "lsblk -nr -o PATH,PARTN '${devnode}' | awk '\$2 == \"${part_num}\" {print \$1; exit}'")
+        if [[ -n "$detected_path" ]]; then
+            echo "$detected_path"
+            return 0
+        fi
+
+        if vm_sh "test -b '${fallback_path}'"; then
+            echo "$fallback_path"
+            return 0
+        fi
+
+        vm_sh "partprobe '${devnode}' >/dev/null 2>&1 || partx -u '${devnode}' >/dev/null 2>&1 || true"
+        vm_sh "udevadm settle || true"
+        sleep 1
+    done
+
+    echo ""
 }
 
 function block_size_bytes() {
@@ -1044,6 +1072,11 @@ function test_dsl_match_mode_wipe_preserves_existing_backing_partitions() {
     local db_sentinel_num
     local wal_sentinel_path
     local db_sentinel_path
+    local dry_payload
+    local dry_resp
+    local dry_validation_error
+    local planned_wal
+    local planned_db
     local out
 
     configured_before=$(get_configured_count)
@@ -1067,6 +1100,22 @@ function test_dsl_match_mode_wipe_preserves_existing_backing_partitions() {
     vm_sh "test -b '${wal_sentinel_path}'"
     vm_sh "test -b '${db_sentinel_path}'"
 
+    dry_payload=$(cat <<EOF
+{"path":[],"osd_match":"eq(@devnode, '${OSD_DEV_TERTIARY}')","wal_match":"eq(@devnode, '${WAL_DEVNODE}')","wal_size":"${SMALL_WALDB_PART_SIZE}","db_match":"eq(@devnode, '${DB_DEVNODE}')","db_size":"${SMALL_WALDB_PART_SIZE}","wipe":true,"dry_run":true}
+EOF
+)
+
+    dry_resp=$(vm_post_disks "$dry_payload")
+    dry_validation_error=$(jq -r '.metadata.validation_error // ""' <<<"$dry_resp")
+    assert_eq "$dry_validation_error" "" "Unexpected dry-run validation error in wipe-preservation test"
+
+    planned_wal=$(jq -r --arg d "$OSD_DISK_TERTIARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .wal_device // ""' <<<"$dry_resp")
+    planned_db=$(jq -r --arg d "$OSD_DISK_TERTIARY" '.metadata.dry_run_assignments[] | select(.osd_device == $d) | .db_device // ""' <<<"$dry_resp")
+    if [[ -z "$planned_wal" || -z "$planned_db" ]]; then
+        echo "$dry_resp" | jq . >&2 || true
+        fail "Expected WAL/DB assignments for wipe-preservation test dry-run"
+    fi
+
     if ! run_vm_capture out "microceph disk add --osd-match \"eq(@devnode, '${OSD_DEV_TERTIARY}')\" --wal-match \"eq(@devnode, '${WAL_DEVNODE}')\" --wal-size ${SMALL_WALDB_PART_SIZE} --db-match \"eq(@devnode, '${DB_DEVNODE}')\" --db-size ${SMALL_WALDB_PART_SIZE} --wipe"; then
         echo "$out"
         fail "Expected match-mode add with --wipe to succeed for data device"
@@ -1078,6 +1127,10 @@ function test_dsl_match_mode_wipe_preserves_existing_backing_partitions() {
     wait_for_configured_count $((configured_before + 1)) 180
     configured_after=$(get_configured_count)
     assert_eq "$configured_after" "$((configured_before + 1))" "Expected exactly one new configured disk in wipe-preservation test"
+
+    vm_sh "partprobe '${WAL_DEVNODE}' >/dev/null 2>&1 || partx -u '${WAL_DEVNODE}' >/dev/null 2>&1 || true"
+    vm_sh "partprobe '${DB_DEVNODE}' >/dev/null 2>&1 || partx -u '${DB_DEVNODE}' >/dev/null 2>&1 || true"
+    vm_sh "udevadm settle || true"
 
     wal_parts_after=$(partition_count "$WAL_DEVNODE")
     db_parts_after=$(partition_count "$DB_DEVNODE")

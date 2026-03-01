@@ -157,3 +157,18 @@ func TestPrintAddDiskFailuresReturnsValidationErrorWhenNoReports(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid payload")
 	}
 }
+
+func TestPrintAddDiskFailuresUsesFallbackForEmptySingleFailureError(t *testing.T) {
+	resp := types.DiskAddResponse{
+		Reports: []types.DiskAddReport{{
+			Path:   "/dev/sdb",
+			Report: "Failure",
+			Error:  "",
+		}},
+	}
+
+	err := printAddDiskFailures(resp)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "disk add failed")
+	}
+}

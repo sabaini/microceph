@@ -62,6 +62,7 @@ func cmdDisksPost(s state.State, r *http.Request) response.Response {
 	}
 
 	if err := validateDiskPostMatchFields(req); err != nil {
+		logger.Debugf("DISK_ADD/API: request rejected by match-field validation: %v", err)
 		return response.SyncResponse(true, types.DiskAddResponse{ValidationError: err.Error()})
 	}
 
@@ -107,6 +108,8 @@ func cmdDisksPost(s state.State, r *http.Request) response.Response {
 
 // handleDSLDiskAdd handles DSL-based device selection for OSD creation.
 func handleDSLDiskAdd(r *http.Request, s state.State, req types.DisksPost) response.Response {
+	logger.Debugf("DSL/API: disk add request: dry_run=%v wipe=%v encrypt=%v osd_match=%q wal_match=%q db_match=%q wal_size=%q db_size=%q", req.DryRun, req.Wipe, req.Encrypt, req.OSDMatch, req.WALMatch, req.DBMatch, req.WALSize, req.DBSize)
+
 	resp := ceph.AddDisksWithDSL(
 		r.Context(),
 		s,
@@ -119,6 +122,9 @@ func handleDSLDiskAdd(r *http.Request, s state.State, req types.DisksPost) respo
 		req.Wipe,
 		req.DryRun,
 	)
+
+	logger.Debugf("DSL/API: disk add response: validation_error=%q reports=%d dry_run_devices=%d dry_run_wal=%d dry_run_db=%d dry_run_partitions=%d dry_run_assignments=%d", resp.ValidationError, len(resp.Reports), len(resp.DryRunDevices), len(resp.DryRunWALDevices), len(resp.DryRunDBDevices), len(resp.DryRunPartitions), len(resp.DryRunAssignments))
+
 	return response.SyncResponse(true, resp)
 }
 
@@ -188,7 +194,7 @@ func parseAndPatchDiskPostParams(rb io.ReadCloser) (types.DisksPost, error) {
 
 	buf := string(body)
 
-	logger.Debugf("CmdDiskPost Req Body: %v", buf)
+	logger.Debugf("DISK_ADD/API: request body: %v", buf)
 
 	diskPath := gjson.Get(buf, "path")
 	if !diskPath.IsArray() {
@@ -201,7 +207,7 @@ func parseAndPatchDiskPostParams(rb io.ReadCloser) (types.DisksPost, error) {
 		patchedBody = buf
 	}
 
-	logger.Debugf("CmdDiskPost Patched Body: %v", patchedBody)
+	logger.Debugf("DISK_ADD/API: patched body: %v", patchedBody)
 
 	err = json.Unmarshal([]byte(patchedBody), &output)
 	if err != nil {
