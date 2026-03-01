@@ -302,6 +302,7 @@ parts:
       - bin/truncate
       - bin/uuidgen
       - bin/findmnt
+      - bin/partx
       - bin/sgdisk
       - lib/*/ceph
       - lib/*/libaio.so*
