@@ -153,6 +153,8 @@ function vm_sh() {
 }
 
 # Run shell command in VM and capture output; return command exit code.
+# This helper intentionally drops `set -e` while the command runs so tests can
+# assert on expected failures without aborting the entire test script.
 # Usage:
 #   if run_vm_capture out "my command"; then ...; fi
 function run_vm_capture() {
@@ -220,6 +222,10 @@ function partition_path_by_number() {
     local fallback_path
     local detected_path
 
+    # Partition naming differs by device type:
+    #   /dev/sdX   -> /dev/sdX1
+    #   /dev/nvme0n1 -> /dev/nvme0n1p1
+    # Build a best-effort fallback path, but prefer lsblk+PARTN when possible.
     if [[ "$devnode" =~ [0-9]$ ]]; then
         fallback_path="${devnode}p${part_num}"
     else
@@ -899,6 +905,8 @@ EOF
     assert_eq "$validation_error_1" "" "Expected first dry-run call to succeed"
     assert_eq "$validation_error_2" "" "Expected second dry-run call to succeed"
 
+    # Compare only planning-relevant fields and canonicalize JSON ordering (-S)
+    # so cosmetic ordering differences don't produce false negatives.
     snapshot_1=$(jq -Sc '{dry_run_devices: .metadata.dry_run_devices, dry_run_wal_devices: .metadata.dry_run_wal_devices, dry_run_db_devices: .metadata.dry_run_db_devices, dry_run_partitions: .metadata.dry_run_partitions, dry_run_assignments: .metadata.dry_run_assignments}' <<<"$resp1")
     snapshot_2=$(jq -Sc '{dry_run_devices: .metadata.dry_run_devices, dry_run_wal_devices: .metadata.dry_run_wal_devices, dry_run_db_devices: .metadata.dry_run_db_devices, dry_run_partitions: .metadata.dry_run_partitions, dry_run_assignments: .metadata.dry_run_assignments}' <<<"$resp2")
 
@@ -1083,6 +1091,8 @@ function test_dsl_match_mode_wipe_preserves_existing_backing_partitions() {
     wal_parts_before=$(partition_count "$WAL_DEVNODE")
     db_parts_before=$(partition_count "$DB_DEVNODE")
 
+    # Plant tiny sentinel partitions first. If match-mode --wipe accidentally
+    # wipes WAL/DB backing disks, these sentinel partitions will disappear.
     wal_sentinel_num=$((wal_parts_before + 1))
     db_sentinel_num=$((db_parts_before + 1))
 
@@ -1135,6 +1145,8 @@ EOF
     wal_parts_after=$(partition_count "$WAL_DEVNODE")
     db_parts_after=$(partition_count "$DB_DEVNODE")
 
+    # +2 = one sentinel we created + one newly allocated partition for this OSD.
+    # Any lower value strongly suggests destructive behavior on backing disks.
     assert_eq "$wal_parts_after" "$((wal_parts_before + 2))" "WAL backing partitions were unexpectedly reset/wiped"
     assert_eq "$db_parts_after" "$((db_parts_before + 2))" "DB backing partitions were unexpectedly reset/wiped"
 
@@ -1241,6 +1253,9 @@ EOF
     wal_link_quaternary=$(vm_exec readlink -f "${osd_dir_quaternary}/block.wal")
     db_link_quaternary=$(vm_exec readlink -f "${osd_dir_quaternary}/block.db")
 
+    # Dry-run plans use stable /dev/disk/by-id paths, while OSD symlinks may
+    # resolve through kernel names (/dev/sdXn). Normalize both sides to real
+    # device nodes before comparing.
     planned_wal_secondary_real=$(vm_exec readlink -f "$planned_wal_secondary")
     planned_db_secondary_real=$(vm_exec readlink -f "$planned_db_secondary")
     planned_wal_quaternary_real=$(vm_exec readlink -f "$planned_wal_quaternary")
