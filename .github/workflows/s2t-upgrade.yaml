@@ -53,7 +53,7 @@ jobs:
       run: ~/actionutils.sh headexec testrgw
 
     - name: Upgrade to tentacle
-      run: ~/actionutils.sh refresh_snap tentacle
+      run: ~/actionutils.sh refresh_snap tentacle/edge
 
     - name: Wait until 3 OSDs are up
       run:  ~/actionutils.sh headexec wait_for_osds_up_in 3
