@@ -1,4 +1,4 @@
-# MicroCeph
+# hey MicroCeph
 
 [![microceph](https://snapcraft.io/microceph/badge.svg)](https://snapcraft.io/microceph)
 [![microceph](https://snapcraft.io/microceph/trending.svg?name=0)](https://snapcraft.io/microceph)
