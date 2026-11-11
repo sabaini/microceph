@@ -1213,6 +1213,13 @@ func (m *OSDManager) doAddOSDWithStorage(ctx context.Context, data types.DiskPar
 		}
 	}()
 
+	if useFlashStore() {
+		err = validateFlashStoreAdd(data, wal, db)
+		if err != nil {
+			return err
+		}
+	}
+
 	if storage == nil {
 		storage, err = m.stabilizeDevicePath(&data)
 		if err != nil {
@@ -1266,24 +1273,33 @@ func (m *OSDManager) doAddOSDWithStorage(ctx context.Context, data types.DiskPar
 		return fmt.Errorf("failed to prepare data device: %w", err)
 	}
 
-	err = m.generateOSDFiles(osdDataPath, nr)
-	if err != nil {
-		logger.Errorf("failed to generate OSD files for %s: %v", data.Path, err)
-		return err
-	}
-
-	if generatedAux != nil {
-		err = m.writeGeneratedAuxManifest(osdDataPath, generatedAux)
+	if useFlashStore() {
+		// prepare generates the OSD uuid and cephx key itself and registers both with the monitors.
+		err = m.bootstrapFlashStoreOSD(osdDataPath, nr, data)
 		if err != nil {
-			logger.Errorf("failed to write generated aux manifest for osd.%d: %v", nr, err)
+			logger.Errorf("failed to bootstrap FlashStore OSD %d: %v", nr, err)
 			return err
 		}
-	}
+	} else {
+		err = m.generateOSDFiles(osdDataPath, nr)
+		if err != nil {
+			logger.Errorf("failed to generate OSD files for %s: %v", data.Path, err)
+			return err
+		}
 
-	err = m.bootstrapOSD(osdDataPath, nr, wal, db, storage)
-	if err != nil {
-		logger.Errorf("failed to bootstrap OSD %d: %v", nr, err)
-		return err
+		if generatedAux != nil {
+			err = m.writeGeneratedAuxManifest(osdDataPath, generatedAux)
+			if err != nil {
+				logger.Errorf("failed to write generated aux manifest for osd.%d: %v", nr, err)
+				return err
+			}
+		}
+
+		err = m.bootstrapOSD(osdDataPath, nr, wal, db, storage)
+		if err != nil {
+			logger.Errorf("failed to bootstrap OSD %d: %v", nr, err)
+			return err
+		}
 	}
 
 	err = m.spawnOSD(nr)
@@ -1678,6 +1694,10 @@ func (m *OSDManager) AddDisksWithDSLRequest(ctx context.Context, req types.Disks
 	}
 
 	if req.WALMatch != "" || req.DBMatch != "" {
+		if useFlashStore() {
+			// refuse before any WAL/DB partition is planned or created
+			return types.DiskAddResponse{ValidationError: "WAL/DB devices are not supported with FlashStore"}
+		}
 		if req.DryRun {
 			return m.buildDSLDryRunPlan(ctx, req)
 		}
@@ -2537,7 +2557,7 @@ func (m *OSDManager) waitForOSDPresence(osd int64, timeout time.Duration) (bool,
 
 // killOSD terminates the osd process for an osd.id.
 func (m *OSDManager) killOSD(osd int64) error {
-	cmdline := fmt.Sprintf("ceph-osd .* --id %d$", osd)
+	cmdline := osdProcessPattern(osd)
 	_, err := m.runner.RunCommand("pkill", "-f", cmdline)
 	if err != nil {
 		if isExitCode(err, 1) {
