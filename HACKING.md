@@ -11,6 +11,7 @@ Wait! No-one's "hacking" anything. The aim of this document is to enable new dev
 5. [👍 Unit-Testing](#👍-unit-testing)
 6. [DB Schema Updates](#db-schema-updates)
 7. [RGW placement (in development)](#rgw-placement-in-development)
+8. [FlashStore OSDs (croit ceph-rust, experimental)](#flashstore-osds-croit-ceph-rust-experimental)
 
 ## ⚡️ Introduction to snaps
 
@@ -237,3 +238,56 @@ All paths are under `microceph/` unless noted.
 | `ceph/services_placement_rgw.go`, `ceph/rgw.go` | Applying on one member: TLS pair, readiness, rollback, disable. |
 | `database/rgw_frontend.go` | The `rgw_frontends` table. |
 | `tests/robot/rgw-placement-tests`, `tests/robot/rgw-placement-multivm-tests` (repository root) | The end-to-end suites. |
+
+## FlashStore OSDs (croit ceph-rust, experimental)
+
+This branch builds a MicroCeph whose OSDs run on [croit ceph-rust](https://github.com/croit/ceph-rust), a Rust implementation of Ceph services published as a read-only source snapshot (public preview, not for production data). `croit-flashstore-osd` replaces `ceph-osd` and BlueStore. Everything else is classic Ceph from the Tentacle packages, because the snapshot has nothing to replace it with:
+
+- Monitors and managers: ceph-rust has none and expects classic ones.
+- `ceph`, `rbd`, `rados` and the other client tools: the snapshot holds the Rust client crates but not the crate that builds the drop-in `librados.so.2` / `librbd.so.1`.
+- RGW and CephFS are not tested on FlashStore OSDs. ceph-rust lists both as later deliverables.
+
+The snapshot's `main` branch tracks Ceph v21.2.0, and its v20.2.4 branch is not published. The OSD built from `main` joins the Tentacle cluster (it accepts `require_osd_release` from Pacific on) and reports itself as `21.2.0 umbrella` in `ceph versions`. Because the monitors are then the older daemons, Ceph will raise `DAEMON_OLD_VERSION` after `mon_warn_older_version_delay` (one week).
+
+### What an operator needs
+
+- One whole NVMe namespace per OSD, formatted to 4096-byte LBAs without metadata (`nvme format /dev/nvmeXnY --lbaf=<index of the 4096+0 format>`), with power-loss protection.
+- Linux 5.19 or newer with io_uring enabled.
+- The snap installed with `--devmode`, see [Confinement](#confinement).
+
+`microceph disk add /dev/nvmeXnY` then works as usual. Two snap options tune it:
+
+| Option | Meaning |
+|---|---|
+| `flashstore.cores` | Cores each OSD runs on, also the store shards of OSDs added later. Unset: the daemon's default (up to 8). The OSD service reads it at start. |
+| `flashstore.allow-vwc` | `true` accepts a device with a volatile write cache when a disk is added. Lab only (emulated NVMe in a VM): such a device has no power-loss protection. |
+
+Refused with an error, because FlashStore cannot serve them: loop file OSDs (`loop,4G,3`), WAL/DB devices (also `--wal-match` / `--db-match`) and `--encrypt`. The OSD service skips an OSD directory that `croit-flashstore-tool` did not prepare, such as a BlueStore OSD of a classic MicroCeph: this snap ships no `ceph-osd`.
+
+`microceph.flashstore-tool` is `croit-flashstore-tool`, for `list`, `inspect --id N`, `fsck --id N` and the like.
+
+### Confinement
+
+FlashStore does all network and disk I/O through io_uring. The seccomp filter of a strictly confined snap denies `io_uring_setup`, `io_uring_enter` and `io_uring_register`, and no interface MicroCeph plugs allows them (snapd 2.78). Under strict confinement `microceph disk add` therefore fails with `kernel store: io_uring refused`. Until snapd allows the three calls, for example in `microceph-support`, install this build with `--devmode`.
+
+With the three calls added to the seccomp profiles of the `daemon`, `osd` and `flashstore-tool` apps by hand, the OSDs run under strict confinement. The one AppArmor rule missing then is read access to `/proc/sys/net/ipv4/tcp_rmem`, which the `network-observe` plug of the `osd` app now provides. Reads of `/proc/irq/*/smp_affinity_list` stay denied; they only feed a host-tuning warning.
+
+### Where the code lives
+
+| Path | Role |
+|---|---|
+| `snap/snapcraft.yaml`, part `ceph-rust` | Builds `croit-flashstore-osd` and `croit-flashstore-tool` from a pinned snapshot commit: kernel TCP and kernel NVMe, no SPDK, no RDMA, no lab backends. |
+| `snapcraft/commands/daemon.start` | Sets `MICROCEPH_OSD_BACKEND=flashstore` for `microcephd`. Unset, the Go code deploys BlueStore as before. |
+| `microceph/ceph/osd_flashstore.go` | Backend switch, `croit-flashstore-tool prepare` in place of `ceph-osd --mkfs`, the refusals above. `prepare` creates the OSD's uuid and cephx key and registers them with the monitors, so MicroCeph generates neither. |
+| `snapcraft/commands/osd.start` | Runs one foreground `croit-flashstore-osd run ... --id N` per prepared OSD. `--id` stays last: `microcephd` finds the process of an OSD by it. |
+| `snap/hooks/configure` | Validates the `flashstore.*` options. |
+| `tests/scripts/flashstore_smoke.sh` | End-to-end smoke test in LXD VMs with emulated NVMe disks. |
+
+### Smoke test
+
+```bash
+tests/scripts/flashstore_smoke.sh /path/to/microceph_*.snap                # one VM, four OSDs
+SMOKE_NODES=3 tests/scripts/flashstore_smoke.sh /path/to/microceph_*.snap  # three VMs, one OSD each
+```
+
+It formats the emulated namespaces to 4096-byte LBAs, deploys the OSDs through `microceph disk add` and checks RADOS (object, omap, xattr, bench), RBD (import/export, snapshot, clone, kernel client), a restart of the OSD service, a killed OSD and, on one VM, `disk remove` and `disk add --wipe`. The variables at the top of the script set VM size, the snapd proxy and a directory of base snaps to side-load.

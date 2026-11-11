@@ -119,6 +119,7 @@ sudo snap connect microceph:mount-observe
 sudo snap connect microceph:load-rbd
 sudo snap connect microceph:microceph-support
 sudo snap connect microceph:network-bind
+sudo snap connect microceph:network-observe
 sudo snap connect microceph:process-control
 sudo snap connect microceph:dm-crypt
 sudo snap restart microceph.daemon
