@@ -32,14 +32,24 @@ def wrapper(tmp_path):
     (data.parent / "current").symlink_to(data)
     (snap / "commands/common").write_text("wait_for_config() { :; }\nlimits() { :; }\n")
     scripts = {
-        "ceph-osd": """import os, pathlib, sys
+        # Like croit-flashstore-osd: stays in the foreground, serves its admin
+        # socket once it is up, exits non-zero when it cannot start.
+        "croit-flashstore-osd": """import os, pathlib, signal, sys
 root = pathlib.Path(os.environ["TEST_ROOT"])
 nr = sys.argv[sys.argv.index("--id") + 1]
 with (root / "attempts").open("a") as stream:
     stream.write(nr + "\\n")
+with (root / ("argv-" + nr)).open("w") as stream:
+    stream.write("\\n".join(sys.argv[1:]))
 if not (root / ("allow-" + nr)).exists():
     sys.exit(1)
 (pathlib.Path(os.environ["SNAP_DATA"]) / "run" / ("ceph-osd." + nr + ".asok")).touch()
+signal.pause()
+""",
+        "snapctl": """import os, pathlib, sys
+option = pathlib.Path(os.environ["TEST_ROOT"]) / ("snap-" + sys.argv[-1])
+if sys.argv[1] == "get" and option.exists():
+    print(option.read_text())
 """,
         "nc": """import pathlib, sys
 sys.exit(0 if pathlib.Path(sys.argv[-1]).exists() else 1)
@@ -66,12 +76,23 @@ os.execv("/bin/sleep", ["sleep", "infinity" if sys.argv[1] == "infinity" else "0
     processes = []
 
     class Wrapper:
-        def add(self, nr, available=True):
+        def add(self, nr, available=True, flashstore=True):
             directory = common / "data/osd" / f"ceph-{nr}"
             directory.mkdir()
+            if flashstore:
+                (directory / "croit-flashstore-osd").touch()
             (directory / "ready").touch()
             if available:
                 self.allow(nr)
+
+        def set_option(self, key, value):
+            (tmp_path / f"snap-{key}").write_text(value)
+
+        def argv(self, nr):
+            return (tmp_path / f"argv-{nr}").read_text().splitlines()
+
+        def output(self):
+            return (tmp_path / "output").read_text()
 
         def allow(self, nr):
             (tmp_path / f"allow-{nr}").touch()
@@ -84,8 +105,10 @@ os.execv("/bin/sleep", ["sleep", "infinity" if sys.argv[1] == "infinity" else "0
             return path.read_text().splitlines() if path.exists() else []
 
         def sleeps(self):
+            """Waits of the main loop, without the admin-socket polls of a start."""
             path = tmp_path / "sleeps"
-            return path.read_text().splitlines() if path.exists() else []
+            sleeps = path.read_text().splitlines() if path.exists() else []
+            return [sleep for sleep in sleeps if sleep != "0.5"]
 
         def start(self):
             output = (tmp_path / "output").open("w")
@@ -154,3 +177,32 @@ def test_reload_during_failed_start_wait_does_not_disable_retry(wrapper):
     eventually(lambda: wrapper.attempts().count("1") >= 2)
     wrapper.allow(1)
     eventually(lambda: wrapper.running(1))
+
+
+def test_osd_runs_in_foreground_with_id_last_and_configured_cores(wrapper):
+    wrapper.set_option("flashstore.cores", "2")
+    wrapper.add(1)
+    wrapper.start()
+    eventually(lambda: wrapper.running(1))
+    argv = wrapper.argv(1)
+    assert argv[0] == "run"
+    assert argv[argv.index("--cores") + 1] == "2"
+    # microcephd finds the process of an OSD by its trailing `--id N`
+    assert argv[-3:] == ["-f", "--id", "1"]
+
+
+def test_osd_without_cores_option_uses_the_daemon_default(wrapper):
+    wrapper.add(1)
+    wrapper.start()
+    eventually(lambda: wrapper.running(1))
+    assert "--cores" not in wrapper.argv(1)
+
+
+def test_non_flashstore_osd_is_skipped(wrapper):
+    wrapper.add(1, flashstore=False)
+    wrapper.add(2)
+    wrapper.start()
+    eventually(lambda: wrapper.running(2))
+    eventually(lambda: "infinity" in wrapper.sleeps())
+    assert wrapper.attempts() == ["2"]
+    assert "osd.1 is not a FlashStore OSD" in wrapper.output()

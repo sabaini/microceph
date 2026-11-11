@@ -8,6 +8,10 @@ summary: Simple clustered Ceph deployment
 description: |-
   MicroCeph is snap-deployed Ceph with built-in clustering.
 
+  This build runs OSDs on croit ceph-rust (https://github.com/croit/ceph-rust):
+  croit-flashstore-osd, the FlashStore OSD written in Rust, replaces ceph-osd
+  and BlueStore. Monitors, managers and client tools are classic Ceph.
+
 confinement: strict
 
 package-repositories:
@@ -131,6 +135,8 @@ apps:
       - hardware-observe
       - network
       - network-bind
+      # croit-flashstore-osd sizes its sockets from /proc/sys/net/ipv4/tcp_rmem
+      - network-observe
       - microceph-support
       - process-control
   rgw:
@@ -209,6 +215,13 @@ apps:
     command: commands/ceph-authtool
     plugs:
       - home
+  flashstore-tool:
+    command: commands/flashstore-tool
+    plugs:
+      - mount-observe
+      - block-devices
+      - hardware-observe
+      - network
 
 parts:
   microceph-orch:
@@ -315,7 +328,6 @@ parts:
       - bin/ceph-mds
       - bin/ceph-mgr
       - bin/ceph-mon
-      - bin/ceph-osd
       - bin/ceph-conf
       - bin/monmaptool
       - bin/rbd
@@ -390,6 +402,52 @@ parts:
       - lib/*/libunwind.so*
       - lib/*/liblmdb.so*
       - share/ceph
+
+  ceph-rust:
+    # croit ceph-rust, a read-only source snapshot of a Rust implementation of
+    # Ceph services. It provides the OSD (croit-flashstore-osd) and its
+    # operator tool; monitors and managers stay classic Ceph. The snapshot on
+    # its main branch tracks Ceph v21.2.0 and joins clusters from Pacific on.
+    plugin: nil
+    source: https://github.com/croit/ceph-rust.git
+    source-type: git
+    source-commit: 48f901404f54c6938e97b3c0288cca452b8b0b90
+    build-packages:
+      - build-essential
+      - ca-certificates
+      - curl
+    build-environment:
+      - RUSTUP_HOME: $CRAFT_PART_BUILD/.rustup
+      - CARGO_HOME: $CRAFT_PART_BUILD/.cargo
+    override-build: |
+      set -eux
+      # rust-toolchain.toml pins the toolchain, rustup installs exactly that.
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+      export PATH="${CARGO_HOME}/bin:${PATH}"
+      rustup toolchain install
+      # The daemon reports the source commit it was built from.
+      export FLASHSTORE_GIT="$(git -C "${CRAFT_PART_SRC}" rev-parse --short=12 HEAD)"
+
+      # The production feature set without SPDK and RDMA: kernel TCP and
+      # kernel NVMe through io_uring. No lab backends (file devices).
+      cargo build --locked --release -p croit-flashstore-osd \
+        --features knet,mimalloc
+      cargo build --locked --release -p croit-flashstore-tool \
+        --no-default-features --features mon-std,elastic,kernel-nvme,mimalloc
+
+      for bin in croit-flashstore-osd croit-flashstore-tool; do
+        install -D -m 0755 "target/release/${bin}" "${CRAFT_PART_INSTALL}/bin/${bin}"
+        strip -s "${CRAFT_PART_INSTALL}/bin/${bin}"
+      done
+      install -d "${CRAFT_PART_INSTALL}/share/ceph-rust"
+      cp COPYING COPYING-* AUTHORS "${CRAFT_PART_INSTALL}/share/ceph-rust/"
+      "${CRAFT_PART_INSTALL}/bin/croit-flashstore-osd" --version \
+        > "${CRAFT_PART_INSTALL}/share/ceph-rust/VERSION"
+    prime:
+      - bin/croit-flashstore-osd
+      - bin/croit-flashstore-tool
+      - share/ceph-rust
 
   dqlite:
     source: https://github.com/canonical/dqlite

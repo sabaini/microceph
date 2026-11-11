@@ -1,4 +1,7 @@
 #!/bin/sh
 export DQLITE_SOCKET="@snap.${SNAP_INSTANCE_NAME}.dqlite"
 
+# OSDs are croit-flashstore-osd (croit ceph-rust) instead of ceph-osd.
+export MICROCEPH_OSD_BACKEND="flashstore"
+
 exec microcephd --state-dir "${SNAP_COMMON}/state"

@@ -10,33 +10,40 @@ cd "${SNAP}"
 
 limits
 
-maybe_unlock() {
-    dev="${1:?missing}"
-    osdid="${2:?missing}"
-    key="${3:?missing}"
-    suffix="${4:-}"
-
-    luksname="luksosd${suffix}-${osdid}"
-
-    [ -b "/dev/mapper/$luksname" ] && return
-
-    if cryptsetup isLuks "$dev" ; then
-        echo "${key}" | cryptsetup luksOpen "$dev" "$luksname" --key-file - --keyfile-size 128
-    fi
-}
-
-get_key() {
-    osdid="${1:?missing}"
-    suffix="${2:-}"
-    ceph config-key get "microceph:osd${suffix}.${osdid}/key"
-}
-
 is_osd_running() {
     osdid="${1:?missing}"
 
     skt="${SNAP_CURRENT}/run/ceph-osd.${osdid}.asok"
 
     nc -z -U "${skt}" >/dev/null 2>&1
+}
+
+# OSDs are croit-flashstore-osd (croit ceph-rust), one per NVMe namespace.
+# The daemon stays in the foreground, so each OSD runs as a background job of
+# this service. `--id` goes last: microcephd finds the process of an OSD by it.
+start_osd() {
+    nr="${1:?missing}"
+
+    args=(run --cluster ceph --set log_to_file=true --set log_to_stderr=false)
+    cores="$(snapctl get flashstore.cores)"
+    if [ -n "${cores}" ]; then
+        args+=(--cores "${cores}")
+    fi
+
+    croit-flashstore-osd "${args[@]}" -f --id "${nr}" &
+    pid=$!
+
+    # Up once the admin socket answers; a start that fails exits before that.
+    for _ in $(seq 1 120); do
+        is_osd_running "${nr}" && return 0
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            wait "${pid}" || true
+            return 1
+        fi
+        sleep 0.5
+    done
+    # Still mounting its store (long WAL replay): leave it to finish.
+    return 0
 }
 
 spawn() {
@@ -50,24 +57,21 @@ spawn() {
 
         [ ! -e "${i}/ready" ] && continue
 
-        is_osd_running "${nr}" && continue
+        # Not prepared by croit-flashstore-tool, e.g. a BlueStore OSD of a
+        # classic MicroCeph: this snap ships no ceph-osd to run it.
+        if [ ! -e "${i}/croit-flashstore-osd" ]; then
+            echo "osd.${nr} is not a FlashStore OSD; skipping" >&2
+            continue
+        fi
 
-        if [ -b "${i}/unencrypted" ] ; then
-            maybe_unlock "${i}/unencrypted" "${nr}" "$( get_key "${nr}" )"
-        fi
-        if [ -b "${i}/unencrypted.wal" ] ; then
-            maybe_unlock "${i}/unencrypted.wal" "${nr}" "$( get_key "${nr}" ".wal" )" ".wal"
-        fi
-        if [ -b "${i}/unencrypted.db" ] ; then
-            maybe_unlock "${i}/unencrypted.db" "${nr}" "$( get_key "${nr}" ".db" )" ".db"
-        fi
+        is_osd_running "${nr}" && continue
 
         # Start the OSD but tolerate per-OSD failure: a single OSD that
         # cannot start (e.g. its backing block device was removed without
         # purging the OSD first) must not abort the loop under `set -e`,
         # otherwise every later OSD on the node is stranded and the service
         # enters an endless restart loop. See issue #521.
-        if ! ceph-osd --cluster ceph --id "${nr}"; then
+        if ! start_osd "${nr}"; then
             echo "osd.${nr} failed to start; will retry" >&2
             retry_pending=true
             continue
@@ -76,7 +80,6 @@ spawn() {
 
 }
 
-# A mapper may appear after this service starts (or after Vault is unsealed).
 # Retry failed starts without restarting healthy OSDs or blocking later OSDs.
 # Once all starts succeed, retain the existing reload-driven idle behaviour.
 timer_pid=""

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+# flashstore.cores: cores each FlashStore OSD runs on (and store shards of new OSDs).
+cores="$(snapctl get flashstore.cores)"
+case "${cores}" in
+    "") ;;
+    0* | *[!0-9]*)
+        echo "flashstore.cores must be a positive integer, got '${cores}'" >&2
+        exit 1
+        ;;
+esac
+
+# flashstore.allow-vwc: accept devices with a volatile write cache for new OSDs.
+# Lab only: such a device has no power-loss protection.
+allow_vwc="$(snapctl get flashstore.allow-vwc)"
+case "${allow_vwc}" in
+    "" | true | false) ;;
+    *)
+        echo "flashstore.allow-vwc must be true or false, got '${allow_vwc}'" >&2
+        exit 1
+        ;;
+esac
