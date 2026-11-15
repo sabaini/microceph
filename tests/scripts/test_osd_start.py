@@ -30,9 +30,10 @@ def wrapper(tmp_path):
     for path in (snap / "commands", data / "run", common / "data/osd", binaries):
         path.mkdir(parents=True)
     (data.parent / "current").symlink_to(data)
-    (snap / "commands/common").write_text("wait_for_config() { :; }\nlimits() { :; }\n")
+    (snap / "commands/common").write_text("wait_for_config() { :; }\nlimits() { :; }\nraise_aio_limit() { :; }\n")
     scripts = {
-        "ceph-osd": """import os, pathlib, sys
+        # Like the real crimson-osd, the stub stays in the foreground once up.
+        "crimson-osd": """import os, pathlib, signal, sys
 root = pathlib.Path(os.environ["TEST_ROOT"])
 nr = sys.argv[sys.argv.index("--id") + 1]
 with (root / "attempts").open("a") as stream:
@@ -40,6 +41,7 @@ with (root / "attempts").open("a") as stream:
 if not (root / ("allow-" + nr)).exists():
     sys.exit(1)
 (pathlib.Path(os.environ["SNAP_DATA"]) / "run" / ("ceph-osd." + nr + ".asok")).touch()
+signal.pause()
 """,
         "nc": """import pathlib, sys
 sys.exit(0 if pathlib.Path(sys.argv[-1]).exists() else 1)
@@ -139,7 +141,8 @@ def test_healthy_wrapper_waits_for_reload_without_periodic_restarts(wrapper):
     wrapper.start()
     eventually(lambda: "infinity" in wrapper.sleeps())
     assert wrapper.attempts() == ["1"]
-    assert wrapper.sleeps() == ["infinity"]
+    # "1" is the poll for the OSD's admin socket; "5" would be a retry.
+    assert set(wrapper.sleeps()) <= {"1", "infinity"}
     wrapper.add(2)
     wrapper.reload()
     eventually(lambda: wrapper.running(2))

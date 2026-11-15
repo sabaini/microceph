@@ -1,4 +1,9 @@
 #!/bin/sh
 export DQLITE_SOCKET="@snap.${SNAP_INSTANCE_NAME}.dqlite"
 
+. "${SNAP}/commands/common"
+
+# microcephd runs crimson-osd --mkfs when a disk is added.
+raise_aio_limit
+
 exec microcephd --state-dir "${SNAP_COMMON}/state"

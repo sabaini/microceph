@@ -9,6 +9,7 @@ cd "${SNAP}"
 . "${SNAP}/commands/common"
 
 limits
+raise_aio_limit
 
 maybe_unlock() {
     dev="${1:?missing}"
@@ -39,6 +40,37 @@ is_osd_running() {
     nc -z -U "${skt}" >/dev/null 2>&1
 }
 
+# crimson-osd has no daemonize mode, so every OSD runs as a background child
+# of this wrapper. The object store and reactor count are fixed when the OSD
+# is created and cannot change afterwards, so they are passed explicitly
+# rather than left to configuration that could drift.
+start_osd() {
+    osdid="${1:?missing}"
+    osdpath="${2:?missing}"
+
+    reactors=1
+    if [ -r "${osdpath}/crimson_cpu_num" ]; then
+        reactors="$(cat "${osdpath}/crimson_cpu_num")"
+    fi
+
+    # Keep "--id <nr>" last: microcephd matches on it to stop a single OSD.
+    crimson-osd --cluster ceph \
+        --osd-objectstore seastore \
+        --crimson-cpu-num "${reactors}" \
+        --id "${osdid}" &
+    osdpid=$!
+
+    # A start that fails does so quickly; wait for the admin socket so that
+    # failure is noticed and retried, without holding up the other OSDs for
+    # longer than a slow but healthy start needs.
+    for _ in $(seq 1 15); do
+        is_osd_running "${osdid}" && return 0
+        kill -0 "${osdpid}" 2>/dev/null || return 1
+        sleep 1
+    done
+    kill -0 "${osdpid}" 2>/dev/null
+}
+
 spawn() {
     retry_pending=false
     for i in "${SNAP_COMMON}/data/osd"/*; do
@@ -67,7 +99,7 @@ spawn() {
         # purging the OSD first) must not abort the loop under `set -e`,
         # otherwise every later OSD on the node is stranded and the service
         # enters an endless restart loop. See issue #521.
-        if ! ceph-osd --cluster ceph --id "${nr}"; then
+        if ! start_osd "${nr}" "${i}"; then
             echo "osd.${nr} failed to start; will retry" >&2
             retry_pending=true
             continue

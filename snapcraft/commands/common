@@ -24,3 +24,20 @@ limits() {
   ulimit -n 1048576
   ulimit -u 1048576
 }
+
+# Each Seastar reactor of a crimson OSD claims about 11000 kernel AIO control
+# blocks. The kernel default of 65536 is used up by three two-reactor OSDs,
+# after which the next crimson-osd, mkfs included, refuses to start. Raise
+# the limit to the value of Ceph's own sysctl file for crimson; never lower
+# what the administrator has set.
+raise_aio_limit() {
+  local want=2097152
+  local cur
+
+  cur="$(cat /proc/sys/fs/aio-max-nr 2>/dev/null || echo 0)"
+  if [ "${cur}" -lt "${want}" ]; then
+    if ! echo "${want}" 2>/dev/null > /proc/sys/fs/aio-max-nr; then
+      echo "cannot raise fs.aio-max-nr from ${cur} to ${want}: crimson OSDs may fail to start" >&2
+    fi
+  fi
+}
