@@ -11,8 +11,16 @@ description: |-
 confinement: strict
 
 package-repositories:
+  # Ceph 21.2.0 (Umbrella) debs with crimson enabled, built from Ubuntu's
+  # packaging carried forward by packaging/ceph-umbrella; no archive or PPA
+  # has Ceph 21 yet. Served on the LXD bridge of the build host, where
+  # snapcraft's build instances reach it. A test repository signed with a
+  # throwaway key; publish the build to a PPA to build anywhere else.
   - type: apt
-    ppa: lmlogiudice/ceph-lp2166817-updates
+    components: [main]
+    suites: [resolute]
+    key-id: FB42550BD737285B930108558345C8CC0B15C94C
+    url: http://10.225.23.1:8642
 
 plugs:
   load-rbd:
@@ -20,6 +28,17 @@ plugs:
     modules:
       - name: rbd
         load: on-boot
+  # Seastar sizes its I/O queues and memory reserve from these kernel limits
+  # and will not start crimson-osd without reading them; no other interface
+  # exposes them. The snap also raises fs.aio-max-nr, whose default is too
+  # low for more than a few crimson OSDs (see raise_aio_limit).
+  kernel-limits:
+    interface: system-files
+    read:
+      - /proc/sys/fs/aio-nr
+      - /proc/sys/vm/min_free_kbytes
+    write:
+      - /proc/sys/fs/aio-max-nr
 
 slots:
   ceph-logs:
@@ -66,6 +85,7 @@ apps:
     command: commands/daemon.start
     daemon: simple
     plugs:
+      - kernel-limits
       - block-devices
       - dm-crypt
       - hardware-observe
@@ -73,6 +93,9 @@ apps:
       - network
       - network-bind
       - microceph-support
+      # crimson-osd --mkfs runs in this app and starts Seastar reactors,
+      # which set their CPU affinity.
+      - process-control
     slots:
       - microceph
   mds:
@@ -126,6 +149,7 @@ apps:
     after:
       - daemon
     plugs:
+      - kernel-limits
       - block-devices
       - dm-crypt
       - hardware-observe
@@ -262,6 +286,13 @@ parts:
         # changed as the original string was longer than 32chars.
         craftctl set version=${pkg_version}+snap${git_version}
 
+      # A crimson-osd package built without crimson installs nothing, and
+      # the prime list would then drop the daemon without complaint.
+      if [ ! -x "$CRAFT_STAGE/bin/crimson-osd" ]; then
+        echo "crimson-osd is missing: stage it from the crimson-enabled Ceph build" >&2
+        exit 1
+      fi
+
       # Verify the workaround against the actual manager module before
       # applying it to the staging tree.
       bash "$CRAFT_PROJECT_DIR/tests/scripts/test_ceph_mgr_notify_patch.sh" "$CRAFT_STAGE"
@@ -284,6 +315,7 @@ parts:
       - ceph-mgr-dashboard
       - ceph-mon
       - ceph-osd
+      - crimson-osd
       - radosgw
       - rbd-mirror
       - cephfs-mirror
@@ -316,6 +348,7 @@ parts:
       - bin/ceph-mgr
       - bin/ceph-mon
       - bin/ceph-osd
+      - bin/crimson-osd
       - bin/ceph-conf
       - bin/monmaptool
       - bin/rbd
@@ -347,11 +380,13 @@ parts:
       - lib/*/libboost_python314.so*
       - lib/*/libboost_thread.so*
       - lib/*/libboost_url.so*
+      - lib/*/libcares.so*
       - lib/*/libcephfs.so*
       - lib/*/libcephsqlite.so*
       - lib/*/libcurl-gnutls.so*
       - lib/*/libdaxctl.so*
       - lib/*/libfuse3.so*
+      - lib/*/libhwloc.so*
       - lib/*/libibverbs.so*
       - lib/*/libicudata.so*
       - lib/*/libicui18n.so*
@@ -367,6 +402,7 @@ parts:
       - lib/*/liboath.so*
       - lib/*/libpmem.so*
       - lib/*/libpmemobj.so*
+      - lib/*/libprotobuf.so*
       - lib/*/libpsl.so*
       - lib/*/libpython3.14.so*
       - lib/*/librabbitmq.so*
@@ -383,6 +419,7 @@ parts:
       - lib/*/libssh2.so*
       - lib/*/libwind.so*
       - lib/*/libxml2.so*
+      - lib/*/libyaml-cpp.so*
       - lib/python3
       - lib/python3.14
       - lib/*/rados-classes

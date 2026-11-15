@@ -121,6 +121,7 @@ sudo snap connect microceph:microceph-support
 sudo snap connect microceph:network-bind
 sudo snap connect microceph:process-control
 sudo snap connect microceph:dm-crypt
+sudo snap connect microceph:kernel-limits
 sudo snap restart microceph.daemon
 ```
 
