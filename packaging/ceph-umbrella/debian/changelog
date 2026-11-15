@@ -1,4 +1,4 @@
-ceph (21.2.0-0ubuntu0~crimson1) resolute; urgency=medium
+ceph (21.2.0-0ubuntu0~crimson1~ppa1) resolute; urgency=medium
 
   * New upstream release 21.2.0 (Umbrella), for a MicroCeph test build.
   * d/p/*: Refresh; drop s390x-noexec.patch (upstream).
@@ -10,7 +10,7 @@ ceph (21.2.0-0ubuntu0~crimson1) resolute; urgency=medium
   * d/python3-*.install: The bindings now install dist-info metadata.
   * d/ceph-mgr-modules-core.install: Add the cli_api and nvmeof modules.
 
- -- MicroCeph crimson build <microceph@localhost>  Sun, 15 Nov 2026 08:52:17 +0100
+ -- Peter Sabaini <peter.sabaini@canonical.com>  Sun, 15 Nov 2026 12:59:06 +0100
 
 ceph (20.2.4+ds-0ubuntu1~bpo26.04.1~ppa202609282139) resolute; urgency=medium
 

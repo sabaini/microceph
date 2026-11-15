@@ -1,8 +1,10 @@
 # Ceph 21.2.0 (Umbrella) debs for the snap
 
 The snap stages all its Ceph packages, `crimson-osd` included, from Ubuntu
-packages of Ceph 21.2.0 built here. No Ubuntu or Debian archive and no PPA has
-Ceph 21 yet. As of November 2026 Ubuntu stops at 20.2.4 and Debian at 20.2.5.
+packages of Ceph 21.2.0 built from `debian/` here and published in
+[ppa:peter-sabaini/ceph-umbrella-crimson](https://launchpad.net/~peter-sabaini/+archive/ubuntu/ceph-umbrella-crimson).
+No Ubuntu or Debian archive has Ceph 21 yet. As of November 2026 Ubuntu stops
+at 20.2.4 and Debian at 20.2.5.
 
 `debian/` is Ubuntu's Tentacle packaging (`20.2.4+ds-0ubuntu1`), carried
 forward to the upstream 21.2.0 tarball:
@@ -25,34 +27,40 @@ forward to the upstream 21.2.0 tarball:
   `ceph-mgr-modules-core`.
 
 The source is the upstream tarball, not a `+ds` repack, so the version is
-`21.2.0-0ubuntu0~crimson1`.
+`21.2.0-0ubuntu0~crimson1~ppa1`.
+
+## Publishing to the PPA
+
+Build a signed source package from the upstream tarball and upload it. The
+`.orig.tar.gz` must be the one `build-debs.sh` verifies:
+
+```bash
+tar -xzf ceph_21.2.0.orig.tar.gz
+cd ceph-21.2.0
+rm -rf debian
+cp -a /path/to/packaging/ceph-umbrella/debian debian
+dpkg-buildpackage -S -sa -d
+cd ..
+dput ppa:peter-sabaini/ceph-umbrella-crimson ceph_21.2.0-0ubuntu0~crimson1~ppa1_source.changes
+```
+
+Bump the `~ppaN` suffix in `debian/changelog` for every new upload. Launchpad's
+amd64 builders take about two and a quarter hours.
 
 ## Building the snap
 
-1. Build the debs. Run as root in an Ubuntu 26.04 container. On 128 cores it
-   takes about 17 minutes:
+`snapcraft pack` pulls the packages from the PPA. The `ceph` part refuses to
+stage without `crimson-osd`.
 
-   ```bash
-   ./build-debs.sh /root/u21
-   ```
+## Building the debs locally
 
-2. Turn them into a repository, signed with the key whose public half is
-   `snap/keys/0B15C94C.asc`:
+To test packaging changes before uploading, build the binary packages as root
+in an Ubuntu 26.04 container. On 128 cores this takes about 17 minutes:
 
-   ```bash
-   ./make-repo.sh /root/u21 /root/repo FB42550BD737285B930108558345C8CC0B15C94C
-   ```
+```bash
+./build-debs.sh /root/u21
+```
 
-3. Serve the repository where snapcraft's build instance can reach it, at the
-   `url` in the `package-repositories` entry of `snap/snapcraft.yaml`:
-
-   ```bash
-   python3 -m http.server 8642 --bind 10.225.23.1 --directory /root/repo
-   ```
-
-4. Pack the snap with `snapcraft pack`. The `ceph` part refuses to stage
-   without `crimson-osd`.
-
-The signing key is a throwaway made for testing. To build anywhere else,
-publish the source package to a PPA instead, and point `package-repositories`
-at that PPA.
+To build the snap from such a local build, serve the debs as a signed apt
+repository (`apt-ftparchive`) and add it to `package-repositories` in
+`snap/snapcraft.yaml`, with the signing key in `snap/keys/`.

@@ -11,16 +11,10 @@ description: |-
 confinement: strict
 
 package-repositories:
-  # Ceph 21.2.0 (Umbrella) debs with crimson enabled, built from Ubuntu's
-  # packaging carried forward by packaging/ceph-umbrella; no archive or PPA
-  # has Ceph 21 yet. Served on the LXD bridge of the build host, where
-  # snapcraft's build instances reach it. A test repository signed with a
-  # throwaway key; publish the build to a PPA to build anywhere else.
+  # Ceph 21.2.0 (Umbrella) debs with crimson enabled, built by Launchpad
+  # from packaging/ceph-umbrella; the Ubuntu archive stops at Ceph 20.
   - type: apt
-    components: [main]
-    suites: [resolute]
-    key-id: FB42550BD737285B930108558345C8CC0B15C94C
-    url: http://10.225.23.1:8642
+    ppa: peter-sabaini/ceph-umbrella-crimson
 
 plugs:
   load-rbd:
