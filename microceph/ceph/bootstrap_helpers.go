@@ -25,6 +25,16 @@ func enableMsgr2() error {
 	return nil
 }
 
+// allowCrimson sets the allow_crimson OSDMap flag. Without it the monitors
+// refuse to boot crimson-osd daemons and to create crimson pools.
+func allowCrimson() error {
+	_, err := cephRun("osd", "set-allow-crimson", "--yes-i-really-mean-it")
+	if err != nil {
+		return fmt.Errorf("Failed to allow crimson OSDs: %w", err)
+	}
+	return nil
+}
+
 // waitForMonitor polls 'ceph mon stat' until it succeeds or the timeout is reached.
 func waitForMonitor(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

@@ -880,28 +880,28 @@ func (s *osdSuite) TestKillOSD() {
 	})
 
 	// Test successful kill with graceful exit.
-	r.On("RunCommand", "pkill", "-f", "ceph-osd .* --id 0$").Return("", nil).Once()
-	r.On("RunCommand", "pgrep", "-f", "ceph-osd .* --id 0$").Return("", createExitError(s.T(), 1)).Once()
+	r.On("RunCommand", "pkill", "-f", "crimson-osd .* --id 0$").Return("", nil).Once()
+	r.On("RunCommand", "pgrep", "-f", "crimson-osd .* --id 0$").Return("", createExitError(s.T(), 1)).Once()
 	err := osdmgr.killOSD(0)
 	assert.NoError(s.T(), err)
 
 	// Test escalation to SIGKILL when SIGTERM does not stop the process.
 	osdKillGracePeriod = 0
-	r.On("RunCommand", "pkill", "-f", "ceph-osd .* --id 2$").Return("", nil).Once()
-	r.On("RunCommand", "pgrep", "-f", "ceph-osd .* --id 2$").Return("1234", nil).Once()
-	r.On("RunCommand", "pkill", "-9", "-f", "ceph-osd .* --id 2$").Return("", nil).Once()
-	r.On("RunCommand", "pgrep", "-f", "ceph-osd .* --id 2$").Return("", createExitError(s.T(), 1)).Once()
+	r.On("RunCommand", "pkill", "-f", "crimson-osd .* --id 2$").Return("", nil).Once()
+	r.On("RunCommand", "pgrep", "-f", "crimson-osd .* --id 2$").Return("1234", nil).Once()
+	r.On("RunCommand", "pkill", "-9", "-f", "crimson-osd .* --id 2$").Return("", nil).Once()
+	r.On("RunCommand", "pgrep", "-f", "crimson-osd .* --id 2$").Return("", createExitError(s.T(), 1)).Once()
 	err = osdmgr.killOSD(2)
 	assert.NoError(s.T(), err)
 	osdKillGracePeriod = 20 * time.Millisecond
 
 	// Test already-stopped OSD.
-	r.On("RunCommand", "pkill", "-f", "ceph-osd .* --id 1$").Return("", createExitError(s.T(), 1)).Once()
+	r.On("RunCommand", "pkill", "-f", "crimson-osd .* --id 1$").Return("", createExitError(s.T(), 1)).Once()
 	err = osdmgr.killOSD(1)
 	assert.NoError(s.T(), err)
 
 	// Test failed kill.
-	r.On("RunCommand", "pkill", "-f", "ceph-osd .* --id 3$").Return("", fmt.Errorf("pkill failed")).Once()
+	r.On("RunCommand", "pkill", "-f", "crimson-osd .* --id 3$").Return("", fmt.Errorf("pkill failed")).Once()
 	err = osdmgr.killOSD(3)
 	assert.Error(s.T(), err)
 	assert.Contains(s.T(), err.Error(), "failed to kill osd.3")
@@ -1145,19 +1145,19 @@ func whenOSDStops(t *testing.T, osd int64) func(mock.Arguments) {
 
 // expectOSDProcessStopped verifies that the OSD is gone after autostart was suppressed.
 func expectOSDProcessStopped(t *testing.T, r *mocks.Runner, osd int64) {
-	cmdline := fmt.Sprintf("ceph-osd .* --id %d$", osd)
+	cmdline := fmt.Sprintf("crimson-osd .* --id %d$", osd)
 	r.On("RunCommand", "pkill", "-f", cmdline).Run(whenOSDStops(t, osd)).Return("", nil).Once()
 	r.On("RunCommand", "pgrep", "-f", cmdline).Return("", createExitError(t, 1)).Once()
 }
 
 // expectNoOSDProcess expects killOSD to find no OSD process to stop, as when the daemon died.
 func expectNoOSDProcess(t *testing.T, r *mocks.Runner, osd int64) {
-	r.On("RunCommand", "pkill", "-f", fmt.Sprintf("ceph-osd .* --id %d$", osd)).Run(whenOSDStops(t, osd)).Return("", createExitError(t, 1)).Once()
+	r.On("RunCommand", "pkill", "-f", fmt.Sprintf("crimson-osd .* --id %d$", osd)).Run(whenOSDStops(t, osd)).Return("", createExitError(t, 1)).Once()
 }
 
 // expectOSDStopFails expects killOSD to fail to stop the OSD process with err.
 func expectOSDStopFails(t *testing.T, r *mocks.Runner, osd int64, err error) {
-	r.On("RunCommand", "pkill", "-f", fmt.Sprintf("ceph-osd .* --id %d$", osd)).Run(whenOSDStops(t, osd)).Return("", err).Once()
+	r.On("RunCommand", "pkill", "-f", fmt.Sprintf("crimson-osd .* --id %d$", osd)).Run(whenOSDStops(t, osd)).Return("", err).Once()
 }
 
 // expectRecordRemoved expects the primary storage of the OSD to be cleared and its record deleted.
@@ -1189,8 +1189,8 @@ func (s *osdSuite) TestDoRemoveOSDStopsProcessBeforeMarkingDown() {
 		"ceph osd tree -f json",
 		"ceph osd crush reweight osd.7 0.000000",
 		"ceph osd out osd.7",
-		"pkill -f ceph-osd .* --id 7$",
-		"pgrep -f ceph-osd .* --id 7$",
+		"pkill -f crimson-osd .* --id 7$",
+		"pgrep -f crimson-osd .* --id 7$",
 		"ceph osd down osd.7",
 		"ceph osd purge osd.7 --yes-i-really-mean-it",
 		"ceph osd ls -f json",
@@ -1238,8 +1238,8 @@ func (s *osdSuite) TestDoRemoveOSDMarksDownAgainWhenBootIsCommittedLate() {
 
 	assert.Equal(s.T(), []string{
 		"ceph osd out osd.7",
-		"pkill -f ceph-osd .* --id 7$",
-		"pgrep -f ceph-osd .* --id 7$",
+		"pkill -f crimson-osd .* --id 7$",
+		"pgrep -f crimson-osd .* --id 7$",
 		"ceph osd down osd.7",
 		"ceph osd purge osd.7 --yes-i-really-mean-it",
 		"ceph osd down osd.7",
@@ -1267,8 +1267,8 @@ func (s *osdSuite) TestDoRemoveOSDNotYetInCephStopsProcessFirst() {
 
 	assert.Equal(s.T(), []string{
 		"ceph osd tree -f json",
-		"pkill -f ceph-osd .* --id 7$",
-		"pgrep -f ceph-osd .* --id 7$",
+		"pkill -f crimson-osd .* --id 7$",
+		"pgrep -f crimson-osd .* --id 7$",
 		"ceph osd tree -f json",
 		"ceph osd crush reweight osd.7 0.000000",
 		"ceph osd out osd.7",
@@ -1307,7 +1307,7 @@ func (s *osdSuite) TestDoRemoveOSDPurgesIdThatIsOnlyInOSDMap() {
 
 	assert.Equal(s.T(), []string{
 		"ceph osd tree -f json",
-		"pkill -f ceph-osd .* --id 7$",
+		"pkill -f crimson-osd .* --id 7$",
 		"ceph osd tree -f json",
 		"ceph osd ls -f json",
 		"ceph osd down osd.7",
@@ -1337,7 +1337,7 @@ func (s *osdSuite) TestDoRemoveOSDChecksSafetyForIdOnlyInOSDMap() {
 	require.NoError(s.T(), err)
 	assert.Equal(s.T(), []string{
 		"ceph osd tree -f json",
-		"pkill -f ceph-osd .* --id 7$",
+		"pkill -f crimson-osd .* --id 7$",
 		"ceph osd tree -f json",
 		"ceph osd ls -f json",
 		"ceph osd down osd.7",
@@ -1464,6 +1464,12 @@ func (s *osdSuite) TestValidateAddOSDArgs() {
 	err = osdmgr.validateAddOSDArgs(loopData, nil, db)
 	assert.Error(s.T(), err)
 	assert.Contains(s.T(), err.Error(), "loopback and WAL/DB are mutually exclusive")
+
+	// Test block device with WAL or DB (should fail, SeaStore has neither)
+	err = osdmgr.validateAddOSDArgs(data, wal, nil)
+	assert.ErrorIs(s.T(), err, errSeaStoreAuxDevices)
+	err = osdmgr.validateAddOSDArgs(data, nil, db)
+	assert.ErrorIs(s.T(), err, errSeaStoreAuxDevices)
 
 	// Test loopback with encryption (should fail)
 	loopDataInvalid := types.DiskParameter{Path: "loop,4G,3", Encrypt: true}

@@ -97,6 +97,17 @@ ms bind ipv4 = {{.ipv4}}
 ms bind ipv6 = {{.ipv6}}
 # https://tracker.ceph.com/issues/70390
 bluestore_elastic_shared_blobs = false
+# OSDs are crimson-osd on SeaStore, which reserves 16 MiB of address space
+# per object and aborts on a larger one; have the OSD refuse such writes.
+osd objectstore = seastore
+osd max object size = 16777216
+
+[mon]
+# Crimson is a tech preview that the monitors only admit once the
+# experimental feature is acknowledged, and crimson-osd only serves pools
+# created with the crimson flag.
+enable experimental unrecoverable data corrupting features = crimson
+osd pool default crimson = true
 
 [client]
 {{if .isCache}}rbd_cache = {{.isCache}}{{end}}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -722,70 +723,75 @@ func (m *OSDManager) checkPristineDevice(disk *types.DiskParameter, deviceType s
 	return nil
 }
 
-// bootstrapOSD bootstraps an OSD.
-func (m *OSDManager) bootstrapOSD(osdDataPath string, nr int64, wal, db *types.DiskParameter, storage *api.ResourcesStorage) error {
+// crimsonReactorThreadsFile is the file in an OSD data directory recording how
+// many Seastar reactor threads (crimson_cpu_num) the OSD was created with.
+// SeaStore partitions the device per reactor at mkfs time, so the OSD keeps
+// that count for the rest of its life; osd.start reads it back.
+const crimsonReactorThreadsFile = "crimson_cpu_num"
+
+// maxCrimsonReactorThreads caps the reactor threads given to a new OSD.
+// MicroCeph nodes usually co-locate several OSDs with the other Ceph daemons.
+const maxCrimsonReactorThreads = 2
+
+var errSeaStoreAuxDevices = errors.New("WAL/DB devices are not supported by crimson OSDs on SeaStore")
+
+// crimsonReactorThreads returns the number of Seastar reactor threads for a new OSD.
+func crimsonReactorThreads() int {
+	return min(maxCrimsonReactorThreads, runtime.NumCPU())
+}
+
+// bootstrapOSD creates the SeaStore object store of a crimson OSD and
+// registers the OSD with the monitors.
+func (m *OSDManager) bootstrapOSD(osdDataPath string, nr int64, wal, db *types.DiskParameter, _ *api.ResourcesStorage) error {
 	logger.Infof("Bootstrapping OSD %s to %d", osdDataPath, nr)
-	var err error
 
-	args := []string{"--mkfs", "--no-mon-config", "-i", fmt.Sprintf("%d", nr)}
-	if wal != nil {
-		err = m.setStablePath(storage, wal)
-		if err != nil {
-			return fmt.Errorf("failed to set stable path for WAL: %w", err)
-		}
-
-		// Check for partitions on WAL device unless wipe is enabled
-		err = m.checkPartitionsOnDevice(wal, storage, "WAL")
-		if err != nil {
-			return err
-		}
-
-		// Check if WAL device is pristine unless wipe is enabled
-		err = m.checkPristineDevice(wal, "WAL")
-		if err != nil {
-			return err
-		}
-
-		err = m.prepareDisk(wal, ".wal", osdDataPath, nr)
-		if err != nil {
-			return fmt.Errorf("failed to set up WAL device: %w", err)
-		}
-		args = append(args, []string{"--bluestore-block-wal-path", wal.Path}...)
-	}
-	if db != nil {
-		err = m.setStablePath(storage, db)
-		if err != nil {
-			return fmt.Errorf("failed to set stable path for DB: %w", err)
-		}
-
-		// Check for partitions on DB device unless wipe is enabled
-		err = m.checkPartitionsOnDevice(db, storage, "DB")
-		if err != nil {
-			return err
-		}
-
-		// Check if DB device is pristine unless wipe is enabled
-		err = m.checkPristineDevice(db, "DB")
-		if err != nil {
-			return err
-		}
-
-		err = m.prepareDisk(db, ".db", osdDataPath, nr)
-		if err != nil {
-			return fmt.Errorf("failed to set up DB device: %w", err)
-		}
-		args = append(args, []string{"--bluestore-block-db-path", db.Path}...)
+	if wal != nil || db != nil {
+		return errSeaStoreAuxDevices
 	}
 
-	_, err = m.runner.RunCommand("ceph-osd", args...)
+	fsid, err := afero.ReadFile(m.fs, filepath.Join(osdDataPath, "fsid"))
+	if err != nil {
+		return fmt.Errorf("failed to read OSD fsid: %w", err)
+	}
+	osdUUID := strings.TrimSpace(string(fsid))
+
+	reactors := strconv.Itoa(crimsonReactorThreads())
+	err = afero.WriteFile(m.fs, filepath.Join(osdDataPath, crimsonReactorThreadsFile), []byte(reactors+"\n"), 0600)
+	if err != nil {
+		return fmt.Errorf("failed to record reactor thread count: %w", err)
+	}
+
+	osdID := fmt.Sprintf("%d", nr)
+	_, err = m.runner.RunCommand("crimson-osd",
+		"--mkfs", "--no-mon-config",
+		"--osd-objectstore", "seastore",
+		"--crimson-cpu-num", reactors,
+		"--osd-uuid", osdUUID,
+		"-i", osdID,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to bootstrap OSD: %w", err)
 	}
 
-	// Write the stamp file.
-	err = afero.WriteFile(m.fs, filepath.Join(osdDataPath, "ready"), []byte(""), 0600)
+	// Unlike ceph-osd, crimson-osd does not create its own OSDMap entry on
+	// first boot, and without one it cannot place itself in the CRUSH map.
+	_, err = m.runner.RunCommand("ceph", "osd", "create", osdUUID, osdID)
 	if err != nil {
-		return fmt.Errorf("failed to write stamp file: %w", err)
+		return fmt.Errorf("failed to register osd.%d: %w", nr, err)
+	}
+
+	// Write the stamp file. SeaStore keeps a "ready" metadata file of its own
+	// under the same name, written at the end of mkfs; leave that one alone.
+	readyPath := osdReadyMarkerPath(osdDataPath)
+	exists, err := afero.Exists(m.fs, readyPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect stamp file: %w", err)
+	}
+	if !exists {
+		err = afero.WriteFile(m.fs, readyPath, []byte(""), 0600)
+		if err != nil {
+			return fmt.Errorf("failed to write stamp file: %w", err)
+		}
 	}
 	logger.Infof("OSD %s bootstrapped successfully", osdDataPath)
 	return nil
@@ -984,6 +990,9 @@ func (m *OSDManager) validateAddOSDArgs(data types.DiskParameter, wal *types.Dis
 		if data.Encrypt {
 			return fmt.Errorf("encryption is not supported on loop devices")
 		}
+	}
+	if wal != nil || db != nil {
+		return errSeaStoreAuxDevices
 	}
 	return nil
 }
@@ -2537,7 +2546,7 @@ func (m *OSDManager) waitForOSDPresence(osd int64, timeout time.Duration) (bool,
 
 // killOSD terminates the osd process for an osd.id.
 func (m *OSDManager) killOSD(osd int64) error {
-	cmdline := fmt.Sprintf("ceph-osd .* --id %d$", osd)
+	cmdline := fmt.Sprintf("crimson-osd .* --id %d$", osd)
 	_, err := m.runner.RunCommand("pkill", "-f", cmdline)
 	if err != nil {
 		if isExitCode(err, 1) {

@@ -147,6 +147,11 @@ func BootstrapCephServices(state interfaces.StateInterface, tempKeyringPath stri
 		return err
 	}
 
+	err = allowCrimson()
+	if err != nil {
+		return err
+	}
+
 	err = initOSDs(state, pathConsts.DataPath)
 	if err != nil {
 		return err
