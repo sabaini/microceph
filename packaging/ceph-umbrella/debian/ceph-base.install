@@ -1,0 +1,22 @@
+## install from source tree
+etc/sudoers.d/ceph-smartctl
+lib/systemd/system/ceph-crash.service
+usr/bin/ceph-crash
+usr/bin/ceph-kvstore-tool
+usr/bin/ceph-run
+usr/bin/crushtool
+usr/bin/monmaptool
+usr/bin/osdmaptool
+usr/bin/ceph-diff-sorted
+usr/lib/*/ceph/erasure-code/*
+usr/lib/*/rados-classes/*
+usr/lib/ceph/ceph_common.sh
+usr/sbin/ceph-create-keys
+usr/share/doc/ceph/sample.ceph.conf
+usr/share/man/man8/ceph-create-keys.8
+usr/share/man/man8/ceph-kvstore-tool.8
+usr/share/man/man8/ceph-run.8
+usr/share/man/man8/crushtool.8
+usr/share/man/man8/monmaptool.8
+usr/share/man/man8/osdmaptool.8
+usr/share/man/man8/ceph-diff-sorted.8

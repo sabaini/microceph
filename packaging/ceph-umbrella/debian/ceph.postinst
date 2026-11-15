@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+dpkg-maintscript-helper rm_conffile \
+	/etc/logrotate.d/ceph 10.2.3-0ubuntu5~ -- "$@"
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,10 @@
+# we don't ship thse thirdparty libs here, afaics.
+# license.txt is outdated but fixing it causes the same error
+# come up for the patch, so...
+ceph source: license-problem-json-evil src/s3select/rapidjson/license.txt
+
+# pybind js source is in src/pybind/mgr/dashboard/frontend/src
+ceph source: source-is-missing src/pybind/mgr/dashboard/frontend/dist/*.js
+
+# regression test file is actually shipped with source and build files
+ceph source: source-contains-prebuilt-ms-help-file src/boost/libs/beast/test/extern/zlib-1.2.11/contrib/dotzlib/DotZLib.chm

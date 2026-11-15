@@ -1,0 +1,24 @@
+Description: Hardcode systemd directory
+Subject: cmake4 appears to be using an arch-dependent
+  systemd directory. Since we are already setting it in
+  debian/rules, make sure that's the one that ends up
+  being selected during installation.
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: not-needed
+
+diff --git a/systemd/CMakeLists.txt b/systemd/CMakeLists.txt
+index 366bab4195..e7a08920a9 100644
+--- a/systemd/CMakeLists.txt
++++ b/systemd/CMakeLists.txt
+@@ -1,11 +1,4 @@
+ find_package(PkgConfig QUIET REQUIRED)
+-pkg_get_variable(SYSTEMD_SYSTEM_UNIT_DIR "systemd" "systemd_system_unit_dir")
+-if(NOT SYSTEMD_SYSTEM_UNIT_DIR)
+-  pkg_get_variable(SYSTEMD_SYSTEM_UNIT_DIR "systemd" "systemdsystemunitdir")
+-  if(NOT SYSTEMD_SYSTEM_UNIT_DIR)
+-    set(SYSTEMD_SYSTEM_UNIT_DIR "${CMAKE_INSTALL_LIBDIR}/systemd/system")
+-  endif()
+-endif()
+ set(SYSTEMD_SYSTEM_UNIT_DIR "${SYSTEMD_SYSTEM_UNIT_DIR}"
+   CACHE PATH "Location for systemd system unit files")
+ 

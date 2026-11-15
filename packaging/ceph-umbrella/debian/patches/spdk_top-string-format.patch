@@ -1,0 +1,39 @@
+Description: spdk_top: always use "%s"-style format for printf()-style functions
+ `ncuses-6.3` added printf-style function attributes and now makes
+ it easier to catch cases when user input is used in palce of format
+ string when built with CFLAGS=-Werror=format-security:
+
+    spdk_top.c:1135:34: error: format not a string literal and no format arguments [-Werror=format-security]
+     1135 |         mvwprintw(win, row, col, tmp_str);
+          |                                  ^~~~~~~
+
+ Let's wrap all the missing places with "%s" format.
+
+Origin: https://review.spdk.io/gerrit/c/spdk/spdk/+/10300
+--- a/src/spdk/app/spdk_top/spdk_top.c
++++ b/src/spdk/app/spdk_top/spdk_top.c
+@@ -655,7 +655,7 @@
+ 		snprintf(&tmp_str[max_str - DOTS_STR_LEN - 2], DOTS_STR_LEN, "%s", dots);
+ 	}
+ 
+-	mvwprintw(win, row, col, tmp_str);
++	mvwprintw(win, row, col, "%s", tmp_str);
+ 
+ 	refresh();
+ 	wrefresh(win);
+@@ -1861,13 +1861,13 @@
+ 			time_last = time_now.tv_sec;
+ 			rc = get_data();
+ 			if (rc) {
+-				mvprintw(g_max_row - 1, g_max_col - strlen(refresh_error) - 2, refresh_error);
++				mvprintw(g_max_row - 1, g_max_col - strlen(refresh_error) - 2, "%s", refresh_error);
+ 			}
+ 
+ 			max_pages = refresh_tab(active_tab, current_page);
+ 
+ 			snprintf(current_page_str, CURRENT_PAGE_STR_LEN - 1, "Page: %d/%d", current_page + 1, max_pages);
+-			mvprintw(g_max_row - 1, 1, current_page_str);
++			mvprintw(g_max_row - 1, 1, "%s", current_page_str);
+ 
+ 			free_data();
+ 

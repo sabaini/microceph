@@ -1,0 +1,17 @@
+Description: Allow builds to work with Python 3.14
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: not-needed
+
+--- a/src/mgr/PyModuleRegistry.cc
++++ b/src/mgr/PyModuleRegistry.cc
+@@ -47,7 +47,9 @@ void PyModuleRegistry::init()
+   std::lock_guard locker(lock);
+ 
+   // Set up global python interpreter
+-#define WCHAR(s) L ## #s
++#define WCHAR_(s) L ## s
++#define WCHAR(s)  WCHAR_(s)
++
+   PyConfig py_config;
+   // do not enable isolated mode, otherwise we would not be able to have access
+   // to the site packages. since we cannot import any module before initializing

@@ -1,0 +1,65 @@
+Description: crimson: build with Boost 1.90
+ Boost 1.90 made boost::intrusive_ptr's copy constructor constexpr under
+ C++20, so GCC 15 instantiates it at the point of use. futurized_store.h
+ and the staged-fltree node.h copy an intrusive_ptr to a type that is
+ still incomplete there, and the lookup of intrusive_ptr_add_ref fails.
+ Make the pointee complete before the copy.
+Forwarded: no
+
+--- a/src/crimson/os/futurized_store.h
++++ b/src/crimson/os/futurized_store.h
+@@ -13,6 +13,7 @@
+ #include "os/Transaction.h"
+ #include "crimson/common/config_proxy.h"
+ #include "crimson/common/smp_helpers.h"
++#include "crimson/os/futurized_collection.h"
+ #include "crimson/osd/exceptions.h"
+ #include "include/buffer_fwd.h"
+ #include "include/uuid.h"
+--- a/src/crimson/os/seastore/onode_manager/staged-fltree/node.h
++++ b/src/crimson/os/seastore/onode_manager/staged-fltree/node.h
+@@ -175,20 +175,15 @@ class tree_cursor_t final
+                               const value_header_t*) const;
+   void invalidate();
+ 
++  // Defined below LeafNode: copying a Ref<LeafNode> needs the complete type.
+   static Ref<tree_cursor_t> create_inserted(
+-      Ref<LeafNode> node, const search_position_t& pos) {
+-    return new tree_cursor_t(node, pos);
+-  }
++      Ref<LeafNode> node, const search_position_t& pos);
+ 
+   static Ref<tree_cursor_t> create_tracked(
+       Ref<LeafNode> node, const search_position_t& pos,
+-      const key_view_t& key, const value_header_t* p_header) {
+-    return new tree_cursor_t(node, pos, key, p_header);
+-  }
++      const key_view_t& key, const value_header_t* p_header);
+ 
+-  static Ref<tree_cursor_t> create_end(Ref<LeafNode> node) {
+-    return new tree_cursor_t(node);
+-  }
++  static Ref<tree_cursor_t> create_end(Ref<LeafNode> node);
+ 
+   /**
+    * Reversed resource management (tree_cursor_t)
+@@ -740,4 +735,19 @@ class LeafNode final : public Node {
+   layout_version_t layout_version = 0;
+ };
+ 
++inline Ref<tree_cursor_t> tree_cursor_t::create_inserted(
++    Ref<LeafNode> node, const search_position_t& pos) {
++  return new tree_cursor_t(node, pos);
++}
++
++inline Ref<tree_cursor_t> tree_cursor_t::create_tracked(
++    Ref<LeafNode> node, const search_position_t& pos,
++    const key_view_t& key, const value_header_t* p_header) {
++  return new tree_cursor_t(node, pos, key, p_header);
++}
++
++inline Ref<tree_cursor_t> tree_cursor_t::create_end(Ref<LeafNode> node) {
++  return new tree_cursor_t(node);
++}
++
+ }

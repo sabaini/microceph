@@ -1,0 +1,19 @@
+Description: Do not use UADK on aarch64
+Subject: Starting with Tentacle, Ceph can use UADK to accelerate
+  certain operations on aarch64. However, this dependency is
+  downloaded from github and compiled. Since the Launchpad builders
+  do not have internet access, we disable its use.
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: not-needed
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -388,7 +388,7 @@ if(WITH_QATZIP)
+   set(HAVE_QATZIP TRUE)
+ endif(WITH_QATZIP)
+ 
+-CMAKE_DEPENDENT_OPTION(WITH_UADK "Enable UADK" ON
++CMAKE_DEPENDENT_OPTION(WITH_UADK "Enable UADK" OFF
+         "CMAKE_SYSTEM_PROCESSOR MATCHES aarch64" OFF)
+ if(WITH_UADK)
+   include(Builduadk)

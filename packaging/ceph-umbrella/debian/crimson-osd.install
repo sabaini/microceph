@@ -1,0 +1,4 @@
+usr/bin/crimson-objectstore-tool
+usr/bin/crimson-osd
+usr/bin/crimson-store-bench
+usr/bin/crimson-store-nbd

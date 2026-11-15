@@ -1,0 +1,21 @@
+commit b854bfcc70ff372cd087c068e0302d36ad86391f
+Author: Ronen Friedman <rfriedma@redhat.com>
+Date:   Sun Mar 3 16:30:59 2024 +0200
+
+    common: fix string creation from '0' in LogEntry
+    
+    C++23 disallows conversion from 'int' to 'string'.
+    That includes returning '0' from a function that returns a string.
+    
+    Signed-off-by: Ronen Friedman <rfriedma@redhat.com>
+
+--- a/src/common/LogEntry.cc
++++ b/src/common/LogEntry.cc
+@@ -73,7 +73,6 @@
+       return LOG_CRIT;
+     default:
+       ceph_abort();
+-      return 0;
+   }
+ }
+ 

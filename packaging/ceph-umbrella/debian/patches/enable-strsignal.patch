@@ -1,0 +1,16 @@
+Description: This defines HAVE_REENTRANT_STRSIGNAL as sys_siglist no longer
+  exists with glibc 2.32 and all programs should use strsignal instead.
+Forwarded: no
+Last-Update: 2020-09-21
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -566,7 +566,7 @@
+   set(HAVE_THREAD_SAFE_RES_QUERY 1 CACHE INTERNAL "Thread safe res_query supported.")
+ endif()
+ 
+-option(WITH_REENTRANT_STRSIGNAL "strsignal is reentrant" OFF)
++option(WITH_REENTRANT_STRSIGNAL "strsignal is reentrant" ON)
+ if(WITH_REENTRANT_STRSIGNAL)
+   set(HAVE_REENTRANT_STRSIGNAL 1 CACHE INTERNAL "Reentrant strsignal is supported.")
+ endif()

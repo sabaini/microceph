@@ -1,0 +1,44 @@
+From a8c1aec073fc8364818027a26fa1ddb5d34c58af Mon Sep 17 00:00:00 2001
+From: Matthew Vernon <mv3@sanger.ac.uk>
+Date: Thu, 4 Feb 2021 11:41:14 +0000
+Subject: [PATCH] rgw/radosgw-admin clarify error when email address already in
+ use
+
+The error message if you try and create an S3 user with an email
+address that is already associated with another S3 account is very
+confusing; this patch makes it much clearer
+
+To reproduce:
+
+radosgw-admin user create --uid=foo --display-name="Foo test" --email=bar@domain.invalid
+radosgw-admin user create --uid=test --display-name="AN test" --email=bar@domain.invalid
+could not create user: unable to parse parameters, user id mismatch, operation id: foo does not match: test
+
+With this patch:
+
+radosgw-admin user create --uid=test --display-name="AN test" --email=bar@domain.invalid
+could not create user: unable to create user test because user id foo already exists with email bar@domain.invalid
+
+Fixes: https://tracker.ceph.com/issues/49137
+Fixes: https://tracker.ceph.com/issues/19411
+Signed-off-by: Matthew Vernon <mv3@sanger.ac.uk>
+(cherry picked from commit 05318d6f71e45a42a46518a0ef17047dfab83990)
+---
+--- a/src/rgw/driver/rados/rgw_user.cc
++++ b/src/rgw/driver/rados/rgw_user.cc
+@@ -834,7 +834,14 @@
+ 
+   ret = check_op(op_state, &subprocess_msg);
+   if (ret < 0) {
+-    set_err_msg(err_msg, "unable to parse request, " + subprocess_msg);
++    if (op_state.is_populated() && (user_id == op_state.get_user_id())) {
++      set_err_msg(err_msg, "unable to create user " + user_id.to_str ()
++		  + " because user id " + op_state.get_user_id().to_str()
++		  + " already exists with email "
++		  + op_state.get_user_email());
++    } else {
++      set_err_msg(err_msg, "unable to parse request, " + subprocess_msg);
++    }
+     return ret;
+   }
+ 

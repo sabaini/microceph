@@ -1,0 +1,235 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+#export DH_VERBOSE=1
+
+DEB_HOST_ARCH_BITS ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_BITS)
+export DEB_BUILD_ARCH      ?= $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+export DEB_HOST_ARCH      ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+export CMAKE_POLICY_VERSION_MINIMUM = 3.5
+
+# support ccache for faster build
+# cmake uses /usr/bin/c*
+ifeq (yes,$(findstring yes,$(shell test -L /usr/lib/ccache/c++ && test -L /usr/lib/ccache/cc && echo -n yes)))
+  extraopts += -DWITH_CCACHE=ON
+endif
+
+# Don't switch to clang for Ubuntu - armhf builder is
+# just fine using g++
+ifeq ($(shell dpkg-vendor --is Debian && echo yes), yes)
+# try to save even more memory on some architectures
+# see #849657 for hints.
+ifneq (,$(findstring $(DEB_HOST_ARCH),armhf mipsel armel sh4 m68k))
+  export CC=clang
+  export CXX=clang++
+  extraopts += -DCMAKE_CXX_COMPILER=/usr/bin/clang++
+  extraopts += -DCMAKE_C_COMPILER=/usr/bin/clang
+else
+    # Reduce size of debug symbols to fix FTBFS due to the
+    # 2GB/3GB address space limits on 32bit
+    ifeq (32,$(DEB_HOST_ARCH_BITS))
+        export DEB_CFLAGS_MAINT_APPEND = -g1
+        export DEB_CXXFLAGS_MAINT_APPEND = -g1
+    endif
+endif
+else
+    # Reduce size of debug symbols to fix FTBFS due to the
+    # 2GB/3GB address space limits on 32bit
+    ifeq (32,$(DEB_HOST_ARCH_BITS))
+        export DEB_CFLAGS_MAINT_APPEND = -g1
+        export DEB_CXXFLAGS_MAINT_APPEND = -g1
+    endif
+endif # dpkg-vendor --is Debian
+
+ifeq ($(shell dpkg-vendor --is Ubuntu && echo yes) $(DEB_HOST_ARCH), yes i386)
+   skip_packages = -Nceph -Nceph-base -Nceph-mds -Nceph-mgr -Nceph-mon -Nceph-osd -Nceph-common -Nradosgw -Nrbd-mirror
+endif
+
+# minimise needless linking and link to libatomic
+# The last is needed because long long atomic operations are not directly
+# supported by all processor architectures
+export DEB_LDFLAGS_MAINT_APPEND= -Wl,--as-needed -latomic
+
+# Enable hardening
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
+
+export DESTDIR=$(CURDIR)/debian/tmp
+
+export JAVA_HOME=/usr/lib/jvm/default-java
+## Set JAVAC to prevent FTBFS due to incorrect use of 'gcj' if found (see "m4/ac_prog_javac.m4").
+export JAVAC=javac
+
+include /usr/share/java/java_defaults.mk
+export JAVA_TARGET_RELEASE=$(java_compat_level)
+
+extraopts += -DWITH_OCF=ON -DWITH_NSS=ON -DWITH_PYTHON3=ON -DWITH_DEBUG=ON
+extraopts += -DWITH_PYTHON2=OFF -DMGR_PYTHON_VERSION=3
+extraopts += -DWITH_PYTHON3=3
+extraopts += -DWITH_CEPHFS_JAVA=ON
+extraopts += -DWITH_CEPHFS_SHELL=ON
+extraopts += -DWITH_TESTS=OFF
+extraopts += -DWITH_SYSTEM_BOOST=ON
+extraopts += -DWITH_LTTNG=ON -DWITH_EMBEDDED=ON
+extraopts += -DCMAKE_INSTALL_LIBEXECDIR=/usr/lib
+extraopts += -DWITH_MGR_DASHBOARD_FRONTEND=OFF
+extraopts += -DWITH_SYSTEMD=ON -DCEPH_SYSTEMD_ENV_DIR=/etc/default
+extraopts += -DCMAKE_INSTALL_SYSCONFDIR=/etc
+extraopts += -DSYSTEMD_SYSTEM_UNIT_DIR=/lib/systemd/system
+extraopts += -DWITH_RADOSGW_KAFKA_ENDPOINT=OFF
+extraopts += -DCMAKE_BUILD_TYPE=RelWithDebInfo
+extraopts += -DWITH_GRAFANA=ON
+extraopts += -DWITH_RADOSGW_SELECT_PARQUET=OFF
+extraopts += -DWITH_JAEGER=OFF
+
+ifneq (,$(findstring $(DEB_HOST_ARCH),amd64 arm64 ppc64el))
+extraopts += -DWITH_RBD_RWL=ON
+extraopts += -DWITH_RBD_SSD_CACHE=ON
+extraopts += -DWITH_SYSTEM_PMDK=ON
+extraopts += -DWITH_BLUESTORE_PMEM=ON
+extraopts += -DWITH_SPDK=ON
+else
+extraopts += -DWITH_SPDK=OFF
+endif
+
+# Enable crimson build on supported architectures. Tentacle renamed the
+# switch from WITH_SEASTAR to WITH_CRIMSON and ignores the old name, which
+# left the crimson-osd package empty.
+ifneq (,$(findstring $(DEB_HOST_ARCH),amd64 arm64 ppc64el s390x))
+extraopts += -DWITH_CRIMSON=ON -DSeastar_CXX_FLAGS=-DSEASTAR_DEFAULT_ALLOCATOR
+endif
+
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+  NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+  extraopts += -DBOOST_J=$(NUMJOBS)
+endif
+
+ifneq (,$(findstring $(DEB_HOST_ARCH),mips64el ia64 m68k ppc64 sh4 sparc64 x32))
+  # beast depends on libboost_{context,coroutine} which is not supported on various archs
+  extraopts += -DWITH_BOOST_CONTEXT=OFF
+else
+  extraopts += -DWITH_BOOST_CONTEXT=ON
+endif
+
+# Use build time calculation unless pkg.ceph.unleashed profile enabled
+ifeq ($(filter pkg.ceph.unleashed,$(DEB_BUILD_PROFILES)),)
+MAX_PARALLEL ?= $(shell ./debian/calc-max-parallel.sh)
+endif
+
+%:
+	dh $@ --buildsystem=cmake --with javahelper,python3,systemd $(MAX_PARALLEL)
+
+override_dh_auto_configure:
+	env | sort
+	dh_auto_configure --buildsystem=cmake -- $(extraopts)
+# after trying to patch the various places where HAVE_ARM_NEON is used
+# the easiest way to get rid of it on armel seems to be to patch the cmake
+# cache file.
+ifeq ($(DEB_HOST_ARCH),armel)
+	sed 's,^HAVE_ARM_NEON.*,HAVE_ARM_NEON:INTERNAL=0,' -i obj-arm-linux-gnueabi/CMakeCache.txt
+endif
+
+# Not every target that includes the generated option headers depends on
+# them, and a parallel build can compile such a target first (seen with
+# src/perfglue/heap_profiler.cc). Generate the headers before anything else.
+override_dh_auto_build:
+	dh_auto_build -- legacy-option-headers
+	dh_auto_build
+
+override_dh_auto_install:
+	dh_auto_install --buildsystem=cmake --destdir=$(DESTDIR)
+	install -D -m 644 udev/50-rbd.rules $(DESTDIR)/lib/udev/rules.d/50-rbd.rules
+	install -D -m 644 src/etc-rbdmap $(DESTDIR)/etc/ceph/rbdmap
+	install -D -m 644 etc/sysctl/90-ceph-osd.conf $(DESTDIR)/etc/sysctl.d/30-ceph-osd.conf
+	install -D -m 600 sudoers.d/ceph-smartctl $(DESTDIR)/etc/sudoers.d/ceph-smartctl
+
+	install -m 755 src/cephadm/cephadm.py $(DESTDIR)/usr/sbin/cephadm
+
+	install -m 644 -D monitoring/ceph-mixin/prometheus_alerts.yml $(DESTDIR)/etc/prometheus/ceph/ceph_default_alerts.yml
+
+	# NOTE: ensure that any versioned erasure coding test code is dropped
+	#       from the package install - package ships unversioned modules.
+	rm -f $(CURDIR)/debian/tmp/usr/lib/*/ceph/erasure-code/libec_*.so.*
+	find $(CURDIR)/debian/tmp/usr/lib/*/ceph/erasure-code -type l -delete || :
+	# avoid running out of disk space
+	rm -rf $(CURDIR)/obj-*-linux-gnu
+
+
+# doc/changelog is a directory, which confuses dh_installchangelogs
+override_dh_installchangelogs:
+	dh_installchangelogs --exclude doc/changelog
+
+override_dh_installlogrotate:
+	cp src/logrotate.conf debian/ceph-common.logrotate
+	dh_installlogrotate -pceph-common
+
+
+override_dh_installinit:
+	cp src/init-radosgw debian/radosgw.init
+	dh_installinit --no-start
+	dh_installinit -pceph-common --name=rbdmap --no-start
+	dh_installinit -pceph-base --name ceph --no-start
+	# install the systemd stuff manually since we have funny service names
+	# and need to update the paths in all of the files post install
+	# systemd:ceph-common
+	install -d -m0755 debian/ceph-common/usr/lib/tmpfiles.d
+	install -m 0644 -D systemd/ceph.tmpfiles.d debian/ceph-common/usr/lib/tmpfiles.d/ceph.conf
+	# NOTE(jamespage): Install previous ceph-mon service from packaging for upgrades
+	install -d -m0755 debian/ceph-mon/lib/systemd/system
+	install -m0644 debian/lib-systemd/system/ceph-mon.service debian/ceph-mon/lib/systemd/system
+	# Ensure Debian/Ubuntu specific systemd units are NOT automatically enabled and started
+	# Enable systemd targets only
+	dh_systemd_enable -Xceph-mon.service -Xceph-osd.service -X ceph-mds.service
+	# Start systemd targets only
+	dh_systemd_start --no-stop-on-upgrade --no-restart-after-upgrade
+
+override_dh_systemd_enable:
+	# systemd enable done as part of dh_installinit
+
+override_dh_systemd_start:
+	# systemd start done as part of dh_installinit
+
+override_dh_makeshlibs:
+	# exclude jni libraries in libcephfs-jni to avoid pointless ldconfig
+	# calls in maintainer scripts; exclude private erasure-code plugins.
+	dh_makeshlibs -V -X/usr/lib/jni -X/usr/lib/$(DEB_HOST_MULTIARCH)/ceph/erasure-code
+
+override_dh_auto_test:
+	# do not run tests
+
+override_dh_shlibdeps:
+	dh_shlibdeps -a --exclude=erasure-code --exclude=rados-classes --exclude=compressor --exclude=ceph_crypto
+
+override_dh_python3:
+	for binding in rados cephfs rbd rgw; do \
+		dh_python3 -p python3-$$binding --shebang=/usr/bin/python3;      \
+        done
+	dh_python3 -p python3-ceph-argparse --shebang=/usr/bin/python3
+	dh_python3 -p python3-ceph-common --shebang=/usr/bin/python3
+	dh_python3 -p ceph-common --shebang=/usr/bin/python3
+	dh_python3 -p ceph-base --shebang=/usr/bin/python3
+	dh_python3 -p ceph-osd --shebang=/usr/bin/python3
+	dh_python3 -p ceph-mgr --shebang=/usr/bin/python3
+	dh_python3 -p cephfs-shell --shebang=/usr/bin/python3
+	dh_python3 -p cephadm --shebang=/usr/bin/python3
+
+override_dh_builddeb:
+	dh_builddeb ${skip_packages}
+
+override_dh_gencontrol:
+	dh_gencontrol ${skip_packages}
+
+
+# Helper target for creating snapshots from upstream git
+DATE=$(shell date +%Y%m%d)
+# Upstream branch to track
+BRANCH=squid
+VERSION=19.2.0
+
+get-orig-snapshot:
+	rm -Rf ceph-upstream
+	git clone --branch $(BRANCH) --depth 1 https://github.com/ceph/ceph ceph-upstream
+	cd ceph-upstream && \
+		export COMMIT=`git rev-parse --short HEAD` && \
+		./make-dist $(VERSION)~git$(DATE).$$COMMIT && \
+		cd .. && \
+		mk-origtargz --version $(VERSION)~git$(DATE).$$COMMIT ceph-upstream/ceph-$(VERSION)~git$(DATE).$$COMMIT.tar.bz2
+	rm -Rf ceph-upstream

@@ -1,0 +1,196 @@
+Description: Fix FTBFS due to Boost deprecations
+Subject: Boost 1.90 deprecated several features that
+  Ceph makes use of, among them in the AIO and process
+  libraries. This patchset updates the source so that
+  it uses the updated implementations.
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: not-needed
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -764,7 +764,7 @@ option(WITH_SYSTEM_BOOST "require and bu
+ # Boost::thread depends on Boost::atomic, so list it explicitly.
+ set(BOOST_COMPONENTS
+   atomic chrono headers thread regex random program_options date_time
+-  iostreams context coroutine url)
++  iostreams context coroutine url process)
+ set(BOOST_HEADER_COMPONENTS container)
+ 
+ if(WITH_MGR)
+--- a/src/arrow/cpp/cmake_modules/ThirdpartyToolchain.cmake
++++ b/src/arrow/cpp/cmake_modules/ThirdpartyToolchain.cmake
+@@ -1118,11 +1118,6 @@ macro(build_boost)
+     set(BOOST_BUILD_PRODUCTS ${BOOST_STATIC_SYSTEM_LIBRARY}
+                              ${BOOST_STATIC_FILESYSTEM_LIBRARY})
+ 
+-    add_thirdparty_lib(Boost::system
+-                       STATIC
+-                       "${BOOST_STATIC_SYSTEM_LIBRARY}"
+-                       INCLUDE_DIRECTORIES
+-                       "${Boost_INCLUDE_DIR}")
+     add_thirdparty_lib(Boost::filesystem
+                        STATIC
+                        "${BOOST_STATIC_FILESYSTEM_LIBRARY}"
+@@ -1138,7 +1133,6 @@ macro(build_boost)
+                         CONFIGURE_COMMAND ${BOOST_CONFIGURE_COMMAND}
+                         BUILD_COMMAND ${BOOST_BUILD_COMMAND}
+                         INSTALL_COMMAND "")
+-    add_dependencies(Boost::system boost_ep)
+     add_dependencies(Boost::filesystem boost_ep)
+   else()
+     externalproject_add(boost_ep
+@@ -1301,7 +1295,7 @@ if(ARROW_USE_BOOST)
+     unset(BUILD_SHARED_LIBS_KEEP)
+   endif()
+ 
+-  foreach(BOOST_LIBRARY Boost::headers Boost::filesystem Boost::system)
++  foreach(BOOST_LIBRARY Boost::headers Boost::filesystem)
+     if(NOT TARGET ${BOOST_LIBRARY})
+       continue()
+     endif()
+--- a/src/common/Graylog.cc
++++ b/src/common/Graylog.cc
+@@ -38,7 +38,8 @@ void Graylog::set_destination(const std:
+ {
+   try {
+     boost::asio::ip::udp::resolver resolver(m_io_service);
+-    m_endpoint = *resolver.resolve(host, std::to_string(port)).cbegin();
++    auto tmp = resolver.resolve(host, std::to_string(port));
++    m_endpoint = (*tmp.begin()).endpoint();
+     m_log_dst_valid = true;
+   } catch (boost::system::system_error const& e) {
+     cerr << "Error resolving graylog destination: " << e.what() << std::endl;
+--- a/src/common/TrackedOp.h
++++ b/src/common/TrackedOp.h
+@@ -39,6 +39,8 @@ inline void intrusive_ptr_release(Tracke
+ class OpHistory;
+ 
+ typedef boost::intrusive_ptr<TrackedOp> TrackedOpRef;
++inline void intrusive_ptr_add_ref (TrackedOp *);
++inline void intrusive_ptr_release (TrackedOp *);
+ 
+ class OpHistoryServiceThread : public Thread
+ {
+@@ -372,15 +374,6 @@ public:
+     }
+   }
+ 
+-  // ref counting via intrusive_ptr, with special behavior on final
+-  // put for historical op tracking
+-  friend void intrusive_ptr_add_ref(TrackedOp *o) {
+-    o->get();
+-  }
+-  friend void intrusive_ptr_release(TrackedOp *o) {
+-    o->put();
+-  }
+-
+ protected:
+   virtual std::string _get_state_string() const {
+     return events.empty() ? std::string() : std::string(events.rbegin()->str);
+@@ -391,4 +384,12 @@ inline void OpTracker::default_dumper(co
+   op._dump(f);
+ }
+ 
++inline void intrusive_ptr_add_ref(TrackedOp *op) {
++  op->get();
++}
++
++inline void intrusive_ptr_release(TrackedOp *op) {
++  op->put();
++}
++
+ #endif
+--- a/src/librbd/migration/HttpClient.cc
++++ b/src/librbd/migration/HttpClient.cc
+@@ -682,7 +682,7 @@ protected:
+ 
+     // ssl_stream object can't be reused after shut down -- move-in
+     // a freshly constructed instance
+-    m_stream = boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(
++    new (&m_stream) boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(
+       http_client->m_strand, http_client->m_ssl_context);
+   }
+ 
+--- a/src/mgr/PyModule.cc
++++ b/src/mgr/PyModule.cc
+@@ -37,26 +37,7 @@
+ // definition for non-const static member
+ std::string PyModule::mgr_store_prefix = "mgr/";
+ 
+-// Courtesy of http://stackoverflow.com/questions/1418015/how-to-get-python-exception-text
+-#define BOOST_BIND_GLOBAL_PLACEHOLDERS
+-// Boost apparently can't be bothered to fix its own usage of its own
+-// deprecated features.
+-
+-// Fix instances of "'BOOST_PP_ITERATION_02' was not declared in this scope; did
+-// you mean 'BOOST_PP_ITERATION_05'" and related macro error bullshit that spans
+-// 300 lines of errors
+-//
+-// Apparently you can't include boost/python stuff _and_ have this header
+-// defined
+-//
+-// Thanks to the ceph-aur folks for the fix at:
+-// https://github.com/bazaah/aur-ceph/commit/8c5cc7d8deec002f7596b6d0860859a0a718f12b 
+-#undef BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS
+-
+-#include <boost/python/extract.hpp>
+-#include <boost/python/import.hpp>
+-#include <boost/python/object.hpp>
+-#undef BOOST_BIND_GLOBAL_PLACEHOLDERS
++#include <boost/python.hpp>
+ #include <boost/algorithm/string/predicate.hpp>
+ #include "include/ceph_assert.h"  // boost clobbers this
+ 
+--- a/src/rgw/CMakeLists.txt
++++ b/src/rgw/CMakeLists.txt
+@@ -1,6 +1,9 @@
+ find_program(GPERF gperf
+   REQUIRED)
+ 
++# Work around Boost.Asio thread-local small-block recycling crashes in RGW HTTP completions.
++add_compile_definitions(BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING)
++
+ if(WITH_RADOSGW_BACKTRACE_LOGGING)
+   add_definitions(-D_BACKTRACE_LOGGING)
+ endif(WITH_RADOSGW_BACKTRACE_LOGGING)
+@@ -358,7 +361,7 @@ if(WITH_OPENLDAP)
+ endif()
+ if(WITH_RADOSGW_LUA_PACKAGES)
+   target_link_libraries(rgw_common
+-    PRIVATE Boost::filesystem StdFilesystem::filesystem)
++    PRIVATE Boost::filesystem Boost::process StdFilesystem::filesystem)
+ endif()
+ 
+ if(WITH_LTTNG)
+--- a/src/rgw/rgw_ssd_driver.cc
++++ b/src/rgw/rgw_ssd_driver.cc
+@@ -13,6 +13,8 @@
+ 
+ #include <filesystem>
+ #include <errno.h>
++#include <boost/asio/system_executor.hpp>
++
+ namespace efs = std::filesystem;
+ 
+ namespace rgw { namespace cache {
+--- a/src/rocksdb/include/rocksdb/trace_record_result.h
++++ b/src/rocksdb/include/rocksdb/trace_record_result.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <vector>
+ 
+--- a/src/tools/immutable_object_cache/CacheServer.cc
++++ b/src/tools/immutable_object_cache/CacheServer.cc
+@@ -36,7 +36,7 @@ int CacheServer::run() {
+   }
+ 
+   try {
+-    ret = m_io_service.run();
++    m_io_service.run();
+   } catch (const std::exception& e) {
+     ldout(cct, 1) << "m_io_service run fails: " << e.what() << dendl;
+     return -1;

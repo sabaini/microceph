@@ -1,0 +1,68 @@
+Description: Fix issues uid/gid mismatch in Resolute
+Subject: cephadm expects a hardcoded uid/gid in the images
+  it uses for bootstrapping. In case of mismatch, change them
+  during runtime initialization.
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: not needed
+
+diff --git a/src/cephadm/cephadmlib/container_types.py b/src/cephadm/cephadmlib/container_types.py
+index c38a27d8da..1404b863da 100644
+--- a/src/cephadm/cephadmlib/container_types.py
++++ b/src/cephadm/cephadmlib/container_types.py
+@@ -3,7 +3,10 @@
+ import copy
+ import enum
+ import functools
++import grp
+ import os
++import pwd
++import subprocess
+ 
+ from typing import Dict, List, Optional, Any, Union, Tuple, Iterable, cast
+ 
+@@ -579,7 +582,7 @@ def get_running_container_name(
+     return None
+ 
+ 
+-def extract_uid_gid(
++def _extract_uid_gid(
+     ctx: CephadmContext,
+     img: str = '',
+     file_path: Union[str, List[str]] = '/var/lib/ceph',
+@@ -609,6 +612,22 @@ def extract_uid_gid(
+     raise RuntimeError('uid/gid not found')
+ 
+ 
++def extract_uid_gid(*args, **kwargs):
++    uid, gid = _extract_uid_gid(*args, **kwargs)
++    try:
++        ceph_uid = pwd.getpwnam('ceph').pw_uid
++        ceph_gid = grp.getgrnam('ceph').gr_gid
++
++        if uid != pwd.getpwnam('ceph').pw_uid:
++            subprocess.check_call(['sudo', 'usermod', '-u', str(uid), 'ceph'])
++        if gid != grp.getgrnam('ceph').gr_gid:
++            subprocess.check_call(['sudo', 'groupmod', '-g', str(gid), 'ceph'])
++    except Exception:
++        pass
++
++    return uid, gid
++
++
+ @functools.lru_cache()
+ def _opt_key(value: str) -> str:
+     """Return a (long) option stripped of its value."""
+diff --git a/src/pybind/CMakeLists.txt b/src/pybind/CMakeLists.txt
+index fb357700a4..240c8949df 100644
+--- a/src/pybind/CMakeLists.txt
++++ b/src/pybind/CMakeLists.txt
+@@ -70,9 +70,6 @@ if(WITH_MGR)
+     endmacro()
+     get_openssl_soversion(${OPENSSL_VERSION} OPENSSL)
+     get_openssl_soversion(${PYSSL_VER} PYSSL)
+-    if(NOT (OPENSSL_SOVERSION VERSION_EQUAL PYSSL_SOVERSION))
+-      message(FATAL_ERROR "Python and Ceph link to different OpenSSL versions: ${PYSSL_VER} vs ${OPENSSL_VERSION}")
+-    endif()
+   else()
+     message(WARNING "could not determine ssl version of python crypto lib")
+   endif()

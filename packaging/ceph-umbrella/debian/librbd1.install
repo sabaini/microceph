@@ -1,0 +1,2 @@
+usr/lib/*/ceph/librbd/*
+usr/lib/*/librbd.so.*

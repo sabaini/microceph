@@ -1,0 +1,37 @@
+Description: Fixes for Ubuntu Mantic
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: no
+
+--- a/src/seastar/include/seastar/net/packet.hh
++++ b/src/seastar/include/seastar/net/packet.hh
+@@ -105,7 +105,7 @@ class packet final {
+         unsigned _len = 0;
+         uint16_t _nr_frags = 0;
+         uint16_t _allocated_frags;
+-        offload_info _offload_info;
++        struct offload_info _offload_info;
+         std::optional<uint32_t> _rss_hash;
+         char _data[internal_data_size]; // only _frags[0] may use
+         unsigned _headroom = internal_data_size; // in _data
+diff --git a/src/spdk/lib/iscsi/iscsi.c b/src/spdk/lib/iscsi/iscsi.c
+index 0a319755fc..36dbd89d0d 100644
+--- a/src/spdk/lib/iscsi/iscsi.c
++++ b/src/spdk/lib/iscsi/iscsi.c
+@@ -102,7 +102,7 @@ srandomdev(void)
+ static int g_arc4random_initialized = 0;
+ 
+ static uint32_t
+-arc4random(void)
++rpl_arc4random(void)
+ {
+ 	uint32_t r;
+ 	uint32_t r1, r2;
+@@ -116,6 +116,8 @@ arc4random(void)
+ 	r = (r1 << 16) | r2;
+ 	return r;
+ }
++
++#define arc4random   rpl_arc4random
+ #endif /* SPDK_CONFIG_HAVE_ARC4RANDOM */
+ 
+ static void

@@ -1,0 +1,24 @@
+lp1986747-fix-osd-class-dir.patch
+enable-strsignal.patch
+update-java-source-target-flags.patch
+# Debian misc fixes
+fix-bash-completion-location
+riscv64-link-pthread.patch
+# text relocation fix AARCH64
+bug1914584.patch
+spdk_top-string-format.patch
+spdk-fix-make-exe.patch
+fix-CheckCxxAtomic-riscv64.patch
+fix-mantic-misc.patch
+fix-fmt-check.patch
+fix-cephadm-build.patch
+ppc64el-fix-linking.patch
+logentry-c++23-compat.patch
+pass-build-flags.patch
+boost-resolute-fix.patch
+patch-out-libnbd.patch
+remove-uadk.patch
+systemd-resolute-fix.patch
+cephadm-id-fix.patch
+python-3.14.patch
+crimson-build-with-gcc-15-and-boost-1.90.patch

@@ -1,0 +1,22 @@
+--- a/cmake/modules/BuildSPDK.cmake
++++ b/cmake/modules/BuildSPDK.cmake
+@@ -55,7 +55,7 @@ macro(build_spdk)
+     # unset $CFLAGS, otherwise it will interfere with how SPDK sets
+     # its include directory.
+     # unset $LDFLAGS, otherwise SPDK will fail to mock some functions.
+-    BUILD_COMMAND env -i PATH=$ENV{PATH} CC=${CMAKE_C_COMPILER} ${make_cmd} EXTRA_CFLAGS=${spdk_CFLAGS}
++    BUILD_COMMAND env -i V=1 PATH=$ENV{PATH} CC=${CMAKE_C_COMPILER} ${MAKE_EXECUTABLE} EXTRA_CFLAGS=${spdk_CFLAGS}
+     BUILD_IN_SOURCE 1
+     BUILD_BYPRODUCTS ${spdk_libs}
+     INSTALL_COMMAND ""
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -327,7 +327,7 @@ if(WITH_BLUESTORE_PMEM)
+ endif()
+ 
+ CMAKE_DEPENDENT_OPTION(WITH_SPDK "Enable SPDK" OFF
+-  "CMAKE_SYSTEM_PROCESSOR MATCHES i386|i686|amd64|x86_64|AMD64|aarch64|riscv64" OFF)
++  "CMAKE_SYSTEM_PROCESSOR MATCHES xxx" OFF)
+ option(WITH_SYSTEM_SPDK "Require a system SPDK instead of building bundled src/spdk" OFF)
+ if(WITH_SPDK)
+   if(NOT WITH_BLUESTORE)

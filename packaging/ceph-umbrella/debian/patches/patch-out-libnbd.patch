@@ -1,0 +1,24 @@
+Description: Patch out libnbd dependency
+Subject: Ceph 19.2.3 added libnbd as an optional dependency
+  to support another source of RBD streams. Because libnbd is
+  only in universe, we patch the build so it doesn't depend
+  on this library.
+Author: Luciano Lo Giudice <luciano.logiudice@canonical.com>
+Forwarded: no
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b138acff00..11fcbf9cfa 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -232,10 +232,7 @@ if(WITH_RBD AND LINUX)
+ endif()
+ 
+ # libnbd
+-if(WITH_RBD AND NOT WIN32)
+-  find_package(libnbd 1.0 REQUIRED)
+-  set(HAVE_LIBNBD ${LIBNBD_FOUND})
+-endif()
++set(HAVE_LIBNBD OFF)
+ 
+ include(CMakeDependentOption)
+ 
